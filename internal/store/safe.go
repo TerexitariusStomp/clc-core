@@ -20,6 +20,15 @@ type (
 		Block       uint64
 		RefreshedAt time.Time
 	}
+
+	// OwnerMessageTarget is the deliberately public identity of an approved CLC
+	// account that can receive a message for an owner address. For a Safe these
+	// are its current projected signers; for an EOA this is the owner itself.
+	OwnerMessageTarget struct {
+		Address  string  `db:"blockchain_address" json:"address"`
+		Username *string `db:"username"           json:"username"`
+		Avatar   *string `db:"avatar_url"         json:"avatar"`
+	}
 )
 
 // ReplaceSafeSigners installs a Safe's full signer set, but only when the
@@ -141,6 +150,42 @@ ORDER BY s.safe_address`, chainID, signer)
 		states = append(states, state)
 	}
 	return states, rows.Err()
+}
+
+// ListOwnerMessageTargets returns only public identities that the messaging
+// write route itself may resolve. Exact addresses are intentional: this does
+// not provide a directory or expose private profile fields.
+func (pg *Pg) ListOwnerMessageTargets(ctx context.Context, tx pgx.Tx, chainID int64, owner string) ([]OwnerMessageTarget, error) {
+	rows, err := tx.Query(ctx, `
+WITH owner_kind AS (
+    SELECT EXISTS (
+        SELECT 1 FROM safe_signers
+        WHERE chain_id = $1 AND safe_address = lower($2)
+    ) AS is_safe
+)
+SELECT u.blockchain_address, u.username, u.avatar_url
+FROM users u CROSS JOIN owner_kind k
+WHERE u.status = 'APPROVED' AND NOT user_retiring(u.id)
+  AND ((NOT k.is_safe AND lower(u.blockchain_address) = lower($2))
+    OR (k.is_safe AND EXISTS (
+        SELECT 1 FROM safe_signers ss
+        WHERE ss.chain_id = $1 AND ss.safe_address = lower($2)
+          AND ss.signer = lower(u.blockchain_address))))
+ORDER BY lower(COALESCE(NULLIF(BTRIM(u.username), ''), u.blockchain_address)),
+         lower(u.blockchain_address)`, chainID, owner)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	targets := []OwnerMessageTarget{}
+	for rows.Next() {
+		var target OwnerMessageTarget
+		if err := rows.Scan(&target.Address, &target.Username, &target.Avatar); err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, rows.Err()
 }
 
 // CatalogHasOwner limits sponsored index registration to real catalog owners.
