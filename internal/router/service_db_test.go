@@ -222,7 +222,10 @@ func TestNewMemberIsReadWithoutWaitingForTheSweep(t *testing.T) {
 	p4.Limits[n.A] = u(1_000_000)
 	n.Chain.Unlock()
 	db := st.Pool()
-	_, err := db.Exec(ctx, `INSERT INTO pool_tokens (pool_id, voucher_id, is_allowed, token_limit) VALUES ($1, $2, TRUE, 1000000)`,
+	// The running structure loop may observe the chain member before this setup
+	// write. Keep the fixture idempotent so that race cannot fail the test.
+	_, err := db.Exec(ctx, `INSERT INTO pool_tokens (pool_id, voucher_id, is_allowed, token_limit) VALUES ($1, $2, TRUE, 1000000)
+		ON CONFLICT (pool_id, voucher_id) DO UPDATE SET is_allowed = EXCLUDED.is_allowed, token_limit = EXCLUDED.token_limit`,
 		n.PoolIDs[n.P4], n.VoucherIDs[n.A])
 	require.NoError(t, err)
 	t.Cleanup(func() {
