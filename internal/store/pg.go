@@ -16,6 +16,7 @@ type (
 	Queries struct {
 		CreateCuratedCatalog              string `query:"create-curated-catalog"`
 		UpdateCuratedCatalog              string `query:"update-curated-catalog"`
+		DeleteCuratedCatalog              string `query:"delete-curated-catalog"`
 		LockCuratedCatalog                string `query:"lock-curated-catalog"`
 		AddCuratedPool                    string `query:"add-curated-pool"`
 		AddCuratedVoucher                 string `query:"add-curated-voucher"`

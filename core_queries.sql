@@ -3325,6 +3325,9 @@ ORDER BY page.distance_meters ASC,page.id ASC;
 --name: delete-curated-catalog-tags
 DELETE FROM catalog_tags WHERE catalog_id=$1;
 
+--name: delete-curated-catalog
+DELETE FROM catalogs WHERE id=$1;
+
 --name: insert-curated-catalog-tag
 INSERT INTO catalog_tags(catalog_id,tag_value) VALUES($1,$2);
 
