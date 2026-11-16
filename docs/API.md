@@ -3341,7 +3341,17 @@ A quota error has this body. The `used` and `limit` values come from the account
 
 An administrator has no catalog limit. Section 14, Current user, shows the usage of the caller. Section 15, Admin, shows how an administrator sets the limit.
 
-### 9.6 `GET /api/v2/users/me/catalogs`
+### 9.6 `DELETE /api/v2/catalogs/:id`
+
+**Access:** User session. The caller must be the owner of the catalog. Service credentials and other users cannot delete it.
+
+Permanently deletes the catalog and its Pool, Voucher, and tag memberships. It does not delete the referenced Pools or Vouchers, and it does not delete previously uploaded immutable files. The catalog immediately stops counting toward the owner's catalog allowance.
+
+The success response is `{"catalogId": "7"}`. Repeating the request after a successful deletion returns `404 E07`.
+
+Errors: `400 E04` for a bad ID. `401 E06`. `403 E10` for a service token or a caller that is not the owner. `404 E07` when the catalog does not exist.
+
+### 9.7 `GET /api/v2/users/me/catalogs`
 
 **Access:** User session.
 
@@ -3349,7 +3359,7 @@ Returns the catalogs that the caller owns. There is no distance filter and no se
 
 The success response is `{"catalogs": [<catalog object>], "nextCursor": null}`. `nextCursor` is a string when more catalogs exist. A bad cursor returns `400 E04`.
 
-### 9.7 `GET /api/v2/catalogs/:id/membership`
+### 9.8 `GET /api/v2/catalogs/:id/membership`
 
 **Access:** User session. The caller must be the owner of the catalog.
 
@@ -3364,7 +3374,7 @@ The success response is `{"added": true}` or `{"added": false}`. A resource that
 
 Errors: `400 E04` for a bad `kind`, `resourceId`, or `:id`. `401 E06`. `403 E10` for a service token or a caller that is not the owner. `404 E07` when the catalog does not exist.
 
-### 9.8 Membership writes
+### 9.9 Membership writes
 
 **Access:** User session. The caller must be the owner of the catalog.
 
@@ -3375,7 +3385,7 @@ Errors: `400 E04` for a bad `kind`, `resourceId`, or `:id`. `401 E06`. `403 E10`
 | `PUT /api/v2/catalogs/:id/vouchers/:voucherId` | Adds the voucher to the catalog. |
 | `DELETE /api/v2/catalogs/:id/vouchers/:voucherId` | Removes the voucher from the catalog. |
 
-The membership read is in section 9.7.
+The membership read is in section 9.8.
 The `:poolId` and `:voucherId` values are internal IDs. They must be positive integers.
 
 - The routes are idempotent. A second `PUT` or `DELETE` gives the same final state.
@@ -7264,6 +7274,7 @@ Routes marked with * exist only when the related feature is configured: `/api/v2
 | POST | `/api/v2/pools/:address/reviews/:id/flag` | User session |
 | POST | `/api/v2/catalogs` | User session |
 | PUT | `/api/v2/catalogs/:id` | User session |
+| DELETE | `/api/v2/catalogs/:id` | User session |
 | GET | `/api/v2/catalogs/:id/membership` | User session |
 | PUT | `/api/v2/catalogs/:id/pools/:poolId` | User session |
 | DELETE | `/api/v2/catalogs/:id/pools/:poolId` | User session |

@@ -3325,6 +3325,9 @@ ORDER BY page.distance_meters ASC,page.id ASC;
 --name: delete-curated-catalog-tags
 DELETE FROM catalog_tags WHERE catalog_id=$1;
 
+--name: delete-curated-catalog
+DELETE FROM catalogs WHERE id=$1;
+
 --name: insert-curated-catalog-tag
 INSERT INTO catalog_tags(catalog_id,tag_value) VALUES($1,$2);
 
@@ -3419,7 +3422,7 @@ SELECT id FROM vouchers WHERE id=$1 AND active FOR SHARE;
 -- resolves only fields the owner explicitly made public.
 --name: list-wants
 WITH eligible AS (
-    SELECT w.id,w.owner_user_id,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,
+    SELECT w.id,w.owner_user_id,u.blockchain_address AS owner_address,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,
         w.starts_at,w.expires_at,w.status,
         CASE WHEN w.status='CLOSED' THEN 'closed'
              WHEN w.starts_at>CURRENT_TIMESTAMP THEN 'scheduled'
@@ -3464,7 +3467,7 @@ SELECT * FROM eligible ORDER BY id DESC LIMIT $12;
 --name: list-wants-next
 WITH page AS (
     SELECT * FROM (
-        SELECT w.id,w.owner_user_id,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,
+        SELECT w.id,w.owner_user_id,u.blockchain_address AS owner_address,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,
             w.starts_at,w.expires_at,w.status,
             CASE WHEN w.status='CLOSED' THEN 'closed' WHEN w.starts_at>CURRENT_TIMESTAMP THEN 'scheduled'
                  WHEN w.expires_at IS NOT NULL AND w.expires_at<=CURRENT_TIMESTAMP THEN 'expired' ELSE 'active' END AS state,
@@ -3497,7 +3500,7 @@ SELECT * FROM page ORDER BY id DESC;
 --name: list-wants-prev
 WITH page AS (
     SELECT * FROM (
-        SELECT w.id,w.owner_user_id,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,
+        SELECT w.id,w.owner_user_id,u.blockchain_address AS owner_address,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,
             w.starts_at,w.expires_at,w.status,
             CASE WHEN w.status='CLOSED' THEN 'closed' WHEN w.starts_at>CURRENT_TIMESTAMP THEN 'scheduled'
                  WHEN w.expires_at IS NOT NULL AND w.expires_at<=CURRENT_TIMESTAMP THEN 'expired' ELSE 'active' END AS state,
@@ -3548,7 +3551,7 @@ FROM token_tag tt LEFT JOIN want_tags wt ON wt.tag_value=tt.value AND wt.want_id
 GROUP BY tt.value ORDER BY tt.value;
 
 --name: list-pool-wants
-SELECT w.id,w.owner_user_id,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
+SELECT w.id,w.owner_user_id,u.blockchain_address AS owner_address,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
     'active'::TEXT AS state,w.image_url,
     0 AS contact_permission,NULL::TEXT AS contact_text,NULL::TEXT AS email,NULL::TEXT AS phone,w.marker_icon,w.marker_color,
     COALESCE((SELECT array_agg(x.tag_value ORDER BY x.tag_value) FROM want_tags x WHERE x.want_id=w.id),ARRAY[]::TEXT[]) AS tags,
@@ -3560,7 +3563,7 @@ WHERE w.status='OPEN' AND NOT user_retiring(w.owner_user_id) AND w.starts_at<=CU
 ORDER BY w.id DESC LIMIT $3;
 
 --name: list-pool-wants-next
-SELECT w.id,w.owner_user_id,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
+SELECT w.id,w.owner_user_id,u.blockchain_address AS owner_address,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
     'active'::TEXT AS state,w.image_url,
     0 AS contact_permission,NULL::TEXT AS contact_text,NULL::TEXT AS email,NULL::TEXT AS phone,
     w.marker_icon,w.marker_color,
@@ -3573,7 +3576,7 @@ WHERE w.status='OPEN' AND NOT user_retiring(w.owner_user_id) AND w.starts_at<=CU
 
 --name: list-pool-wants-prev
 SELECT * FROM (
-    SELECT w.id,w.owner_user_id,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
+    SELECT w.id,w.owner_user_id,u.blockchain_address AS owner_address,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
         'active'::TEXT AS state,w.image_url,
         0 AS contact_permission,NULL::TEXT AS contact_text,NULL::TEXT AS email,NULL::TEXT AS phone,
         w.marker_icon,w.marker_color,COALESCE((SELECT array_agg(x.tag_value ORDER BY x.tag_value) FROM want_tags x WHERE x.want_id=w.id),ARRAY[]::TEXT[]) AS tags,
@@ -3689,16 +3692,16 @@ SELECT * FROM (
 ) page ORDER BY id DESC;
 
 --name: list-owned-wants
-SELECT w.id,w.owner_user_id,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
+SELECT w.id,w.owner_user_id,u.blockchain_address AS owner_address,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
     CASE WHEN w.status='CLOSED' THEN 'closed' WHEN w.starts_at>CURRENT_TIMESTAMP THEN 'scheduled' WHEN w.expires_at IS NOT NULL AND w.expires_at<=CURRENT_TIMESTAMP THEN 'expired' ELSE 'active' END AS state,
     w.image_url,w.contact_permission,w.contact_text,NULL::TEXT AS email,NULL::TEXT AS phone,
     w.marker_icon,w.marker_color,COALESCE((SELECT array_agg(x.tag_value ORDER BY x.tag_value) FROM want_tags x WHERE x.want_id=w.id),ARRAY[]::TEXT[]) AS tags,
     NULL::FLOAT8 AS distance_meters,w.created_at,w.updated_at
-FROM wants w
+FROM wants w JOIN users u ON u.id=w.owner_user_id
 WHERE w.owner_user_id=$1 AND ($2::BIGINT=0 OR w.id<$2) ORDER BY w.id DESC LIMIT $3;
 
 --name: get-want
-SELECT w.id,w.owner_user_id,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
+SELECT w.id,w.owner_user_id,u.blockchain_address AS owner_address,w.name,w.description,w.location_name,w.geo_lat,w.geo_lng,w.starts_at,w.expires_at,w.status,
     CASE WHEN w.status='CLOSED' THEN 'closed' WHEN w.starts_at>CURRENT_TIMESTAMP THEN 'scheduled' WHEN w.expires_at IS NOT NULL AND w.expires_at<=CURRENT_TIMESTAMP THEN 'expired' ELSE 'active' END AS state,
     w.image_url,
     CASE WHEN $2::BIGINT IS NOT NULL THEN w.contact_permission ELSE 0 END AS contact_permission,w.contact_text,

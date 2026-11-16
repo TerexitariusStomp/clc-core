@@ -88,6 +88,24 @@ func TestMarketMapCacheSkipsEntryLargerThanCapacity(t *testing.T) {
 	}
 }
 
+func TestMarketMapCacheClearDropsEveryEntry(t *testing.T) {
+	cache := newMarketMapCache(time.Now)
+	cache.set("catalog-one", store.MarketMapResult{})
+	cache.set("catalog-two", store.MarketMapResult{})
+
+	cache.clear()
+
+	if _, ok := cache.get("catalog-one"); ok {
+		t.Fatal("first entry survived cache clear")
+	}
+	if _, ok := cache.get("catalog-two"); ok {
+		t.Fatal("second entry survived cache clear")
+	}
+	if cache.bytes != 0 || cache.order.Len() != 0 || len(cache.entries) != 0 {
+		t.Fatalf("cache state after clear = bytes %d, order %d, entries %d", cache.bytes, cache.order.Len(), len(cache.entries))
+	}
+}
+
 func TestMarketMapLoadsCoalesceAndCacheHitsDoNotSpendTokens(t *testing.T) {
 	api := &API{
 		marketMapCache:    newMarketMapCache(time.Now),

@@ -24,6 +24,7 @@ type (
 		Items      []store.CuratedCatalogMember `json:"items"`
 		NextCursor *string                      `json:"nextCursor"`
 		Added      bool                         `json:"added"`
+		CatalogID  string                       `json:"catalogId"`
 	}
 )
 
@@ -184,6 +185,41 @@ func TestCuratedCatalogOwnershipConcurrentCreateAndMembershipDB(t *testing.T) {
 	curatedResult(t, curatedRequest(a, "PUT", path+"/pools/2147483647", token, ""), 404)
 	_, err = a.store.Pool().Exec(ctx, `INSERT INTO catalog_pools(catalog_id,pool_id) VALUES($1,2147483647)`, id)
 	require.Error(t, err)
+
+	// Catalog deletion is an exact-owner operation. It releases the live quota,
+	// removes only catalog-owned junction rows, and leaves referenced resources.
+	curatedResult(t, curatedRequest(a, "DELETE", path, "", ""), 401)
+	curatedResult(t, curatedRequest(a, "DELETE", path, stranger, ""), 403)
+	curatedResult(t, curatedRequest(a, "DELETE", path, service, ""), 403)
+	_, err = a.store.Pool().Exec(ctx, `UPDATE vouchers SET active=true WHERE id=$1`, voucher)
+	require.NoError(t, err)
+	require.True(t, curatedResult(t, curatedRequest(a, "PUT", voucherPath, token, ""), 200).Added)
+	a.marketMapCache.set("catalog-delete-regression", store.MarketMapResult{})
+	_, cached := a.marketMapCache.get("catalog-delete-regression")
+	require.True(t, cached)
+	deleted := curatedResult(t, curatedRequest(a, "DELETE", path, token, ""), 200)
+	require.Equal(t, fmt.Sprint(id), deleted.CatalogID)
+	_, cached = a.marketMapCache.get("catalog-delete-regression")
+	require.False(t, cached)
+	require.Equal(t, 404, curatedRequest(a, "GET", path, "", "").Code)
+	require.Equal(t, 404, curatedRequest(a, "DELETE", path, token, "").Code)
+	var catalogCount int
+	require.NoError(t, a.store.Pool().QueryRow(ctx, `SELECT count(*) FROM catalogs WHERE id=$1`, id).Scan(&catalogCount))
+	require.Zero(t, catalogCount)
+	for _, table := range []string{"catalog_pools", "catalog_vouchers", "catalog_tags"} {
+		var count int
+		require.NoError(t, a.store.Pool().QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE catalog_id=$1`, id).Scan(&count))
+		require.Zero(t, count, table)
+	}
+	for table, resourceID := range map[string]uint64{"pools": secondPool, "vouchers": voucher} {
+		var count int
+		require.NoError(t, a.store.Pool().QueryRow(ctx, `SELECT count(*) FROM `+table+` WHERE id=$1`, resourceID).Scan(&count))
+		require.Equal(t, 1, count, table)
+	}
+	usage := curatedRequest(a, "GET", "/api/v2/users/me/resource-usage", token, "")
+	require.Equal(t, 200, usage.Code, usage.Body.String())
+	require.Contains(t, usage.Body.String(), `"catalogs":{"used":0,"limit":1,"unlimited":false,"canCreate":true}`)
+	require.Equal(t, 200, curatedRequest(a, "POST", "/api/v2/catalogs", token, body).Code)
 }
 
 func TestCuratedCatalogNearbyCursorOriginDB(t *testing.T) {

@@ -21,6 +21,7 @@ type (
 	Want struct {
 		ID                uint64     `db:"id"                 json:"id"`
 		OwnerUserID       uint64     `db:"owner_user_id"      json:"-"`
+		OwnerAddress      string     `db:"owner_address"      json:"ownerAddress"`
 		Name              string     `db:"name"               json:"name"`
 		Description       string     `db:"description"        json:"description"`
 		LocationName      string     `db:"location_name"      json:"locationName"`

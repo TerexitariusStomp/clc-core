@@ -2783,6 +2783,53 @@ paths:
           description: 'E11: POST and the caller used all the catalog slots.'
       security:
       - cookieAuth: []
+    delete:
+      tags:
+      - Curated catalogs
+      summary: Permanently delete a catalog
+      description: 'Permanently deletes the caller-owned catalog and its Pool, Voucher, and tag memberships. Referenced Pools, Vouchers, and immutable uploaded files remain. The catalog immediately stops counting toward the owner quota. Access: User session. The caller must be the owner.'
+      operationId: deleteCatalogsById
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+        description: Record ID.
+      responses:
+        '200':
+          description: The catalog was permanently deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  description:
+                    type: string
+                  result:
+                    type: object
+                    properties:
+                      catalogId:
+                        type: string
+                required:
+                - ok
+                - description
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 'E04: the ID is invalid.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: 'E06: the request has no valid session.'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: 'E10: the caller uses a service token or is not the owner.'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 'E07: the catalog does not exist.'
+      security:
+      - cookieAuth: []
   /api/v2/catalogs/{id}/pools:
     get:
       tags:

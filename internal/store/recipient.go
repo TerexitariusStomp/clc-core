@@ -25,9 +25,11 @@ type (
 
 const (
 	recipientProjection = `WITH recipients AS (
-    SELECT 'user'::TEXT AS kind, username AS name,
-           username AS alias, blockchain_address AS address, $2::BIGINT AS chain_id
-    FROM users WHERE username IS NOT NULL AND status = 'APPROVED' AND NOT user_retiring(id)
+    SELECT 'user'::TEXT AS kind,
+           COALESCE(NULLIF(BTRIM(username), ''), blockchain_address) AS name,
+           COALESCE(NULLIF(BTRIM(username), ''), blockchain_address) AS alias,
+           blockchain_address AS address, $2::BIGINT AS chain_id
+    FROM users WHERE status = 'APPROVED' AND NOT user_retiring(id)
     UNION ALL
     SELECT 'pool', COALESCE(display_name, name), COALESCE(display_name, name), address,
            chain_id
@@ -53,9 +55,28 @@ FROM identity_claims c JOIN pools p ON p.chain_id = CASE
 WHERE c.namespace = 'recipient' AND c.name = normalize_identity_name($1)
   AND c.owner_kind = 'pool' AND p.active AND ($2::BIGINT = 0 OR p.chain_id = $2)`
 
-	recipientSearchQuery = recipientProjection + `WHERE ($3 = '' OR kind = $3)
-        AND ((kind = 'user' AND normalize_identity_name(alias) = normalize_identity_name($4))
-          OR (kind = 'pool' AND normalize_identity_name(alias) LIKE '%' || normalize_identity_name($1) || '%' ESCAPE '\'))
+	recipientSearchQuery = `WITH recipients AS (
+    SELECT 'user'::TEXT AS kind, username AS name, username AS alias,
+           blockchain_address AS address, $2::BIGINT AS chain_id
+    FROM users
+    WHERE username IS NOT NULL AND status = 'APPROVED' AND NOT user_retiring(id)
+      AND normalize_identity_name(username) = normalize_identity_name($4)
+    UNION ALL
+    SELECT 'user', COALESCE(NULLIF(BTRIM(username), ''), blockchain_address),
+           COALESCE(NULLIF(BTRIM(username), ''), blockchain_address),
+           blockchain_address, $2::BIGINT
+    FROM users
+    WHERE status = 'APPROVED' AND NOT user_retiring(id)
+      AND lower(blockchain_address) = lower($4)
+      AND (username IS NULL OR normalize_identity_name(username) <> normalize_identity_name($4))
+    UNION ALL
+    SELECT 'pool', COALESCE(display_name, name), COALESCE(display_name, name), address, chain_id
+    FROM pools
+    WHERE active AND ($2::BIGINT = 0 OR chain_id = $2)
+      AND COALESCE(display_name, name) IS NOT NULL
+      AND normalize_identity_name(COALESCE(display_name, name)) LIKE '%' || normalize_identity_name($1) || '%' ESCAPE '\'
+) SELECT kind, name, alias, address, chain_id FROM recipients
+        WHERE ($3 = '' OR kind = $3)
         ORDER BY (normalize_identity_name(alias) = normalize_identity_name($4)) DESC,
                  lower(alias), kind, address LIMIT 20`
 
