@@ -49,6 +49,7 @@ type (
 	CuratedCatalogStore interface {
 		CreateCuratedCatalog(context.Context, pgx.Tx, uint64, CuratedCatalogWrite) (uint64, error)
 		UpdateCuratedCatalog(context.Context, pgx.Tx, uint64, CuratedCatalogWrite) error
+		DeleteCuratedCatalog(context.Context, pgx.Tx, uint64) error
 		LockCuratedCatalog(context.Context, pgx.Tx, uint64) (uint64, error)
 		GetCuratedCatalog(context.Context, pgx.Tx, uint64) (CuratedCatalog, error)
 		ListCuratedCatalogs(context.Context, pgx.Tx, uint64, CatalogFilter, *CatalogLocation, CuratedCatalogCursor, uint64) ([]CuratedCatalog, error)
@@ -67,6 +68,10 @@ func (pg *Pg) CreateCuratedCatalog(ctx context.Context, tx pgx.Tx, owner uint64,
 }
 func (pg *Pg) UpdateCuratedCatalog(ctx context.Context, tx pgx.Tx, id uint64, w CuratedCatalogWrite) error {
 	_, err := tx.Exec(ctx, pg.queries.UpdateCuratedCatalog, id, w.Name, nullableDescription(w.Description), w.ImageURL, w.LocationName, w.GeoLat, w.GeoLng)
+	return err
+}
+func (pg *Pg) DeleteCuratedCatalog(ctx context.Context, tx pgx.Tx, id uint64) error {
+	_, err := tx.Exec(ctx, pg.queries.DeleteCuratedCatalog, id)
 	return err
 }
 func (pg *Pg) LockCuratedCatalog(ctx context.Context, tx pgx.Tx, id uint64) (uint64, error) {

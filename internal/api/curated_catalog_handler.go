@@ -324,6 +324,27 @@ func (a *API) curatedCatalogSaveHandler(c *echo.Context) error {
 		return map[string]any{"catalog": row}, readErr
 	})
 }
+
+func (a *API) curatedCatalogDeleteHandler(c *echo.Context) error {
+	id, err := curatedID(c.Param("id"))
+	if err != nil {
+		return respondCatalogSearchError(c, err)
+	}
+	err = a.curatedResponse(c, func(tx pgx.Tx) (map[string]any, error) {
+		if ownerErr := a.requireCuratedOwner(c, tx, id); ownerErr != nil {
+			return nil, ownerErr
+		}
+		if deleteErr := a.store.DeleteCuratedCatalog(c.Request().Context(), tx, id); deleteErr != nil {
+			return nil, deleteErr
+		}
+		return map[string]any{"catalogId": strconv.FormatUint(id, 10)}, nil
+	})
+	if err == nil {
+		a.marketMapCache.clear()
+	}
+	return err
+}
+
 func (a *API) curatedMembersHandler(c *echo.Context) error {
 	id, err := curatedID(c.Param("id"))
 	if err != nil {

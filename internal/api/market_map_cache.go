@@ -94,6 +94,17 @@ func (c *marketMapCache) set(key string, result any) {
 	}
 }
 
+// clear drops every cached public map response after a committed catalog write
+// removes a resource. The cache is deliberately small and short-lived, so a
+// full clear is safer than trying to infer which filter combinations held it.
+func (c *marketMapCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[string]*list.Element)
+	c.order.Init()
+	c.bytes = 0
+}
+
 func (c *marketMapCache) remove(element *list.Element) {
 	entry, ok := element.Value.(*marketMapCacheEntry)
 	if !ok {

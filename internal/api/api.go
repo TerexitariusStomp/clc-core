@@ -309,6 +309,7 @@ func New(o APIOpts) *API {
 	apiGroup.POST("/pools/:address/reviews/:id/flag", a.poolReviewFlagHandler, a.requireUserAuth())
 	apiGroup.POST("/catalogs", a.curatedCatalogSaveHandler, a.requireUserAuth())
 	apiGroup.PUT("/catalogs/:id", a.curatedCatalogSaveHandler, a.requireUserAuth())
+	apiGroup.DELETE("/catalogs/:id", a.curatedCatalogDeleteHandler, a.requireUserAuth())
 	apiGroup.GET("/catalogs/:id/membership", a.curatedMembershipHandler, a.requireUserAuth())
 	apiGroup.PUT("/catalogs/:id/pools/:poolId", a.curatedMembershipHandler, a.requireUserAuth())
 	apiGroup.DELETE("/catalogs/:id/pools/:poolId", a.curatedMembershipHandler, a.requireUserAuth())
