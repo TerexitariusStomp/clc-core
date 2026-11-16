@@ -446,6 +446,19 @@ func (a *API) safeOwnerHandler(c *echo.Context) error {
 			result = map[string]any{"kind": "safe", "owner": state.Address, "signers": state.Signers, "threshold": threshold}
 		}
 	}
+	targets, err := a.store.ListOwnerMessageTargets(ctx, tx, a.chainID, address)
+	if err != nil {
+		return handlePostgresError(c, err)
+	}
+	messageTargets := make([]map[string]any, len(targets))
+	for i, target := range targets {
+		messageTargets[i] = map[string]any{
+			"address":  checksum(target.Address),
+			"username": target.Username,
+			"avatar":   target.Avatar,
+		}
+	}
+	result["messageTargets"] = messageTargets
 	if err := tx.Commit(ctx); err != nil {
 		return handlePostgresError(c, err)
 	}

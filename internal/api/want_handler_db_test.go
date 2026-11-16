@@ -145,6 +145,7 @@ func TestWantLifecyclePrivacyQuotaDiscoveryAndPoolDerivationDB(t *testing.T) {
 		wantBody(t, "Bicycle repair", now.Add(-time.Hour), nil, "Meet by the market", true, false))
 	active := wantResult(t, createResponse, http.StatusCreated).Want
 	requireWantPrivacyBoundary(t, createResponse, "want")
+	require.Equal(t, strings.ToLower(address), strings.ToLower(active.OwnerAddress))
 	require.Equal(t, "active", active.State)
 	require.Equal(t, []string{"Bicycle Help"}, active.Tags)
 	require.Equal(t, 1, active.ContactPermission)

@@ -377,6 +377,36 @@ func TestMessagingRequestAcceptSendReadDB(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, read(0).Code)
 }
 
+func TestMessagingUsesCurrentPeerUsernameDB(t *testing.T) {
+	f := newMessagingFixture(t)
+	alice, bob := f.approved(), f.approved()
+	conv := f.connect(alice, bob)
+	_, err := f.a.store.Pool().Exec(context.Background(), `UPDATE users SET username='current-peer-name' WHERE id=$1`, bob.ID)
+	require.NoError(t, err)
+
+	res := f.do(alice, http.MethodGet, fmt.Sprintf("/api/v2/conversations/%d", conv), nil)
+	require.Equal(t, http.StatusOK, res.Code, res.Raw)
+	var detail messagingConversation
+	res.decode(t, &detail)
+	require.NotNil(t, detail.Peer)
+	require.Equal(t, "current-peer-name", *detail.Peer.Username)
+
+	res = f.do(alice, http.MethodGet, "/api/v2/conversations?kind=direct", nil)
+	require.Equal(t, http.StatusOK, res.Code, res.Raw)
+	var page struct {
+		Items []messagingConversation `json:"items"`
+	}
+	res.decode(t, &page)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, "current-peer-name", *page.Items[0].Peer.Username)
+
+	_, err = f.a.store.Pool().Exec(context.Background(), `UPDATE users SET username='renamed-peer' WHERE id=$1`, bob.ID)
+	require.NoError(t, err)
+	res = f.do(alice, http.MethodGet, fmt.Sprintf("/api/v2/conversations/%d", conv), nil)
+	res.decode(t, &detail)
+	require.Equal(t, "renamed-peer", *detail.Peer.Username, "conversation identity must not be a stale snapshot")
+}
+
 func TestMessagingAuthorizationDB(t *testing.T) {
 	f := newMessagingFixture(t)
 	alice, bob, mallory := f.approved(), f.approved(), f.approved()
