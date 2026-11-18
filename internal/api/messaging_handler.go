@@ -25,13 +25,25 @@ func (a *API) messagingReadTx(ctx context.Context) (pgx.Tx, error) {
 	return a.store.Pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 }
 
-// GET /conversations?kind=&cursor=&limit=
+// GET /conversations?kind=&cursor=&limit=&peerAddress=
 func (a *API) listConversationsHandler(c *echo.Context) error {
 	kind := c.QueryParam("kind")
 	if kind != "" && kind != store.ConversationDirect && kind != store.ConversationHelpdesk {
 		return messagingRespond(c, messagingInvalid("kind must be direct or helpdesk"))
 	}
-	after, err := decodeMessagingCursor(c.QueryParam("cursor"))
+	cursor := c.QueryParam("cursor")
+	var peerAddress string
+	if peers, present := c.QueryParams()["peerAddress"]; present {
+		if len(peers) != 1 || kind == store.ConversationHelpdesk || cursor != "" {
+			return messagingRespond(c, messagingInvalid("peerAddress takes one address and requires a direct lookup without a cursor"))
+		}
+		address, err := messagingAddress(peers[0], "peerAddress")
+		if err != nil {
+			return messagingRespond(c, err)
+		}
+		peerAddress = common.HexToAddress(address).Hex()
+	}
+	after, err := decodeMessagingCursor(cursor)
 	if err != nil {
 		return messagingRespond(c, err)
 	}
@@ -47,9 +59,19 @@ func (a *API) listConversationsHandler(c *echo.Context) error {
 	}
 	defer tx.Rollback(ctx)
 
-	views, err := a.store.ListConversationViews(ctx, tx, caller, kind, after, limit+1)
-	if err != nil {
-		return err
+	var views []store.ConversationView
+	if peerAddress != "" {
+		view, err := a.store.GetDirectConversationViewByPeer(ctx, tx, caller, peerAddress)
+		if err == nil {
+			views = append(views, view)
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	} else {
+		views, err = a.store.ListConversationViews(ctx, tx, caller, kind, after, limit+1)
+		if err != nil {
+			return err
+		}
 	}
 	var next *string
 	if len(views) > limit {

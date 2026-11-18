@@ -4643,6 +4643,19 @@ LEFT JOIN LATERAL (
     FROM messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1
 ) lm ON true;
 
+-- Find one direct conversation using the wallet and unique pair indexes.
+-- As in the ordinary list, a pending request from someone the caller blocked is left out.
+--name: messaging-direct-conversation-id-by-peer
+SELECT c.id
+FROM users peer
+JOIN conversations c ON c.kind = 'direct'
+    AND c.user_a_id = LEAST($1::INT, peer.id)
+    AND c.user_b_id = GREATEST($1::INT, peer.id)
+WHERE lower(peer.blockchain_address) = lower($2)
+  AND peer.id <> $1::INT
+  AND NOT (c.status = 'pending' AND c.actor_id <> $1::INT
+      AND EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = $1::INT AND b.blocked_id = c.actor_id));
+
 -- The caller's conversations, newest activity first. Activity is the later of
 -- the last message and the last status change (GREATEST skips a NULL), so a
 -- fresh request to reopen an old conversation sorts by the request. $2 is the
