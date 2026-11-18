@@ -52,6 +52,12 @@ func (r *recordingStore) SetPoolTokenMembership(
 	return []router.EdgeKey{recordedEdge}, nil
 }
 
+func (r *recordingStore) PoolTokenMembershipStates(
+	_ context.Context, _ pgx.Tx, _, _ string,
+) (map[router.EdgeKey]bool, error) {
+	return map[router.EdgeKey]bool{recordedEdge: true}, nil
+}
+
 func (r *recordingStore) SetPoolTokenLimit(
 	_ context.Context, _ pgx.Tx, pool, token, limit string, pos router.Position,
 ) ([]router.EdgeKey, error) {

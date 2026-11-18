@@ -204,6 +204,7 @@ func loadSub(pgStore store.Store, chainProvider *ethutils.Provider, workers *wor
 	}
 	subInst, err := sub.NewSub(sub.SubObts{
 		Router:      routerSink,
+		QueueClient: workers.Client(),
 		ChainID:     ko.MustInt64("chain.id"),
 		Store:       pgStore,
 		JS:          js,

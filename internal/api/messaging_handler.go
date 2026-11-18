@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cosmo-local-credit/clc-core/internal/store"
 	"github.com/cosmo-local-credit/clc-core/pkg/event"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v5"
@@ -88,8 +91,9 @@ func (a *API) unreadConversationsHandler(c *echo.Context) error {
 // everything else.
 func (a *API) createConversationHandler(c *echo.Context) error {
 	var req struct {
-		RecipientAddress string  `json:"recipientAddress"`
-		Intro            *string `json:"intro"`
+		RecipientAddress string                 `json:"recipientAddress"`
+		Intro            *string                `json:"intro"`
+		Context          *messagingContextInput `json:"context"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return handleBindError(c, err)
@@ -142,6 +146,11 @@ func (a *API) createConversationHandler(c *echo.Context) error {
 		return messagingRespond(c, errMessagingNotFound)
 	}
 
+	contextJSON, err := a.validateMessageContext(ctx, tx, recipient.Address, req.Context)
+	if err != nil {
+		return messagingRespond(c, err)
+	}
+
 	existing, err := a.store.LockDirectPair(ctx, tx, low, high)
 	var conversationID int64
 	switch {
@@ -171,12 +180,13 @@ func (a *API) createConversationHandler(c *echo.Context) error {
 	// The intro is the requester's first message, so it stays in the history
 	// once the request is answered. The row is locked by now, as every send
 	// requires. No message event: the request's own push carries it.
-	if intro != nil {
+	if intro != nil || len(contextJSON) > 0 {
 		message, _, err := a.store.InsertMessage(ctx, tx, store.MessageWrite{
 			ConversationID: conversationID,
 			SenderUserID:   caller,
 			ClientID:       uuid.NewString(),
 			Body:           intro,
+			Context:        contextJSON,
 		})
 		if err != nil {
 			return err
@@ -202,6 +212,63 @@ func (a *API) createConversationHandler(c *echo.Context) error {
 		return err
 	}
 	return messagingResult(c, http.StatusCreated, conversationWire(view, caller))
+}
+
+func (a *API) validateMessageContext(ctx context.Context, tx pgx.Tx, recipientAddress string, input *messagingContextInput) (json.RawMessage, error) {
+	if input == nil {
+		return nil, nil
+	}
+	if input.Kind != "pool" && input.Kind != "voucher" && input.Kind != "want" && input.Kind != "catalog" {
+		return nil, messagingInvalid("context.kind must be pool, voucher, want, or catalog")
+	}
+	resourceID := input.ResourceID
+	if input.Kind == "pool" || input.Kind == "voucher" {
+		if !common.IsHexAddress(resourceID) {
+			return nil, messagingInvalid("context.resourceId must be a hex address")
+		}
+		resourceID = common.HexToAddress(resourceID).Hex()
+	}
+	resource, err := a.store.MessagingResourceByID(ctx, tx, a.chainID, input.Kind, resourceID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errMessagingNotFound
+		}
+		return nil, err
+	}
+	targets, err := a.store.ListOwnerMessageTargets(ctx, tx, a.chainID, resource.OwnerAddress)
+	if err != nil {
+		return nil, err
+	}
+	allowed := false
+	for _, target := range targets {
+		if strings.EqualFold(target.Address, recipientAddress) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return nil, errMessagingNotFound
+	}
+	snapshot := messagingResourceContext{
+		Kind: resource.Kind, ResourceID: resource.ResourceID, ResourceName: resource.ResourceName,
+	}
+	if input.ProposedVoucherAddress != nil {
+		if input.Kind != "pool" || !common.IsHexAddress(*input.ProposedVoucherAddress) {
+			return nil, messagingInvalid("a proposed Voucher requires a Pool context and valid address")
+		}
+		voucher, err := a.store.MessagingVoucherByAddress(ctx, tx, a.chainID, *input.ProposedVoucherAddress)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errMessagingNotFound
+			}
+			return nil, err
+		}
+		snapshot.ProposedVoucher = &messagingVoucherContext{
+			Address: common.HexToAddress(voucher.Address).Hex(), Name: voucher.Name, Symbol: voucher.Symbol,
+		}
+	}
+	encoded, err := json.Marshal(snapshot)
+	return encoded, err
 }
 
 // rerequest reopens an existing direct row. Only whoever declined or revoked
@@ -417,6 +484,20 @@ func (a *API) postConversationMessageHandler(c *echo.Context) error {
 			return messagingRespond(c, errMessagingNotFound)
 		}
 	}
+	var contextJSON json.RawMessage
+	if input.Context != nil {
+		if members.Kind != store.ConversationDirect {
+			return messagingRespond(c, messagingInvalid("resource context is only available in direct conversations"))
+		}
+		recipient := members.UserAAddress
+		if caller == members.UserAID && members.UserBAddress != nil {
+			recipient = *members.UserBAddress
+		}
+		contextJSON, err = a.validateMessageContext(ctx, tx, recipient, input.Context)
+		if err != nil {
+			return messagingRespond(c, err)
+		}
+	}
 
 	message, inserted, err := a.store.InsertMessage(ctx, tx, store.MessageWrite{
 		ConversationID: id,
@@ -424,9 +505,10 @@ func (a *API) postConversationMessageHandler(c *echo.Context) error {
 		ClientID:       input.ClientID,
 		Body:           input.Body,
 		ImageURLs:      input.ImageURLs,
+		Context:        contextJSON,
 	})
 	if err != nil {
-		return err
+		return messagingRespond(c, err)
 	}
 	if !inserted {
 		// The same clientId committed concurrently, possibly elsewhere.

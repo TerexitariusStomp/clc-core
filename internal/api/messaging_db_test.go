@@ -85,12 +85,71 @@ func (f *msgFixture) cleanup() {
 		`DELETE FROM river_job WHERE kind = 'MESSAGING_EVENT' AND (args->'actor'->>'userId')::INT = ANY($1)`,
 		`DELETE FROM abuse_reports WHERE reporter_id = ANY($1) OR reported_user_id = ANY($1) OR resolved_by = ANY($1)`,
 		`DELETE FROM conversations WHERE user_a_id = ANY($1) OR user_b_id = ANY($1)`,
+		`DELETE FROM pools WHERE name = '` + messagingTestMarker + `' AND $1::BIGINT[] IS NOT NULL`,
+		`DELETE FROM vouchers WHERE name = '` + messagingTestMarker + `' AND $1::BIGINT[] IS NOT NULL`,
 		`DELETE FROM users WHERE id = ANY($1)`,
 	} {
 		if _, err := pool.Exec(ctx, stmt, f.users); err != nil {
 			f.t.Errorf("messaging cleanup %q: %v", stmt, err)
 		}
 	}
+}
+
+func TestMessagingResourceContextDB(t *testing.T) {
+	f := newMessagingFixture(t)
+	alice, bob, carol := f.approved(), f.approved(), f.approved()
+	poolAddress, voucherAddress := randomAddress(t), randomAddress(t)
+	_, err := f.a.store.Pool().Exec(t.Context(), `
+		INSERT INTO pools(chain_id,address,name,active,owner_address)
+		VALUES($1,$2,$3,true,$4)`,
+		f.a.chainID, poolAddress, messagingTestMarker, bob.Address)
+	require.NoError(t, err)
+	_, err = f.a.store.Pool().Exec(t.Context(), `
+		INSERT INTO vouchers(chain_id,address,name,symbol,active,owner_address)
+		VALUES($1,$2,$3,'MSGCTX',true,$4)`,
+		f.a.chainID, voucherAddress, messagingTestMarker, alice.Address)
+	require.NoError(t, err)
+
+	context := map[string]any{
+		"kind": "pool", "resourceId": strings.ToLower(poolAddress),
+		"proposedVoucherAddress": strings.ToLower(voucherAddress),
+	}
+	res := f.do(alice, http.MethodPost, "/api/v2/conversations", map[string]any{
+		"recipientAddress": bob.Address, "context": context,
+	})
+	require.Equal(t, http.StatusCreated, res.Code, res.Raw)
+	var conversation messagingConversation
+	res.decode(t, &conversation)
+	require.NotNil(t, conversation.LastMessage)
+	require.Nil(t, conversation.LastMessage.Body)
+	require.Equal(t, "pool", conversation.LastMessage.Context.Kind)
+	require.Equal(t, poolAddress, conversation.LastMessage.Context.ResourceID)
+	require.Equal(t, messagingTestMarker, conversation.LastMessage.Context.ResourceName)
+	require.NotNil(t, conversation.LastMessage.Context.ProposedVoucher)
+	require.Equal(t, voucherAddress, conversation.LastMessage.Context.ProposedVoucher.Address)
+
+	require.Equal(t, http.StatusOK, f.setStatus(bob, conversation.ID, "accepted").Code)
+	res = f.do(alice, http.MethodPost,
+		fmt.Sprintf("/api/v2/conversations/%d/messages", conversation.ID),
+		map[string]any{"clientId": uuid.NewString(), "context": context})
+	require.Equal(t, http.StatusCreated, res.Code, res.Raw)
+	var sent messagingMessage
+	res.decode(t, &sent)
+	require.Nil(t, sent.Body)
+	require.Equal(t, poolAddress, sent.Context.ResourceID)
+
+	res = f.do(alice, http.MethodPost, "/api/v2/conversations", map[string]any{
+		"recipientAddress": carol.Address, "context": context,
+	})
+	require.Equal(t, http.StatusNotFound, res.Code, res.Raw)
+
+	res = f.do(alice, http.MethodPost,
+		fmt.Sprintf("/api/v2/conversations/%d/messages", conversation.ID),
+		map[string]any{"clientId": uuid.NewString(), "context": map[string]any{
+			"kind": "voucher", "resourceId": voucherAddress,
+			"proposedVoucherAddress": voucherAddress,
+		}})
+	require.Equal(t, http.StatusBadRequest, res.Code, res.Raw)
 }
 
 func randomAddress(t *testing.T) string {

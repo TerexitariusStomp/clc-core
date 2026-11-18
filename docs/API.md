@@ -7042,7 +7042,7 @@ Nobody can tell that they were blocked.
 | 30 messages per user per minute (per instance) | `POST /api/v2/conversations/:id/messages` and `POST /api/v2/admin/helpdesk/:id/messages` | `429`, `E11`, `Retry-After` |
 
 **Text limits.** `body` at most 2000 characters, `intro` at most 200, a report `comment` at most 1000, at most 4 `imageUrls`.
-Each image URL must be an absolute `http(s)` URL. A message needs text, an image, or both; whitespace alone is not text.
+Each image URL must be an absolute `http(s)` URL. A message needs text, an image, or resource context; whitespace alone is not text.
 
 **Paging.** List routes return `{ "items": [...], "nextCursor": string | null }`.
 Pass `nextCursor` back as `cursor`. A cursor is opaque. `limit` defaults to 30 and is capped at 100.
@@ -7086,11 +7086,13 @@ Pass `nextCursor` back as `cursor`. A cursor is opaque. `limit` defaults to 30 a
   "sender": "self",
   "body": "Hello",
   "imageUrls": [],
+  "context": null,
   "createdAt": "2026-11-09T10:00:00Z"
 }
 ```
 
 `sender` is relative to the caller: `self`, `peer`, or `support` for an administrator's reply in helpdesk.
+`context` is `null`, or an immutable snapshot of the Pool, Voucher, Want or Catalog from which the sender opened the conversation. A Pool context may include a proposed Voucher.
 
 ### 16.1 `GET /api/v2/conversations`
 
@@ -7107,11 +7109,12 @@ A message is unread when someone other than the caller sent it and its id is abo
 
 ### 16.3 `POST /api/v2/conversations`
 
-Body: `{ "recipientAddress": "0x...", "intro": "optional" }`.
+Body: `{ "recipientAddress": "0x...", "intro": "optional", "context": optional }`.
 Requests a direct conversation and returns `201` with the conversation, status `pending`.
 A non-empty `intro` is also stored as the requester's first message, so it stays in the history after the request is answered. While the request waits on the recipient it counts under `requests` in the unread counts, not under `direct`.
 A conversation that the caller declined or revoked is reopened. Any other existing conversation returns `409` with code `E16`; only the person who declined or revoked may reopen one.
 Spends one of the caller's 100 daily requests.
+When `context` is present, the recipient must be the resource's current EOA owner or a current projected Safe signer. Invalid, inactive or unrelated resources return the generic `404`. The context is stored as the first message even when `intro` is absent.
 
 ### 16.4 `GET /api/v2/conversations/:id`
 
@@ -7133,11 +7136,12 @@ History stays readable after a revoke or a block.
 
 ### 16.7 `POST /api/v2/conversations/:id/messages`
 
-Body: `{ "clientId": "uuid", "body": "optional", "imageUrls": ["https://..."] }`.
+Body: `{ "clientId": "uuid", "body": "optional", "imageUrls": ["https://..."], "context": optional }`.
 Returns `201` with the message.
 A repeated `clientId` returns `200` with the stored message and stores nothing. A `clientId` the caller used in another conversation returns `409`.
 A direct conversation must be `accepted` (`409` otherwise) and have no block in either direction (generic `404`).
 Posting to a resolved helpdesk conversation reopens it.
+Resource context is accepted only in direct conversations and is authorized against the receiving member at send time.
 
 ### 16.8 `PUT /api/v2/conversations/:id/read`
 

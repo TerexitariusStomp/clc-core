@@ -88,6 +88,7 @@ func TestMigrationFiles(t *testing.T) {
 	assert.Contains(t, sqlFiles, "078_gnosis_usd_feed.sql")
 	assert.Contains(t, sqlFiles, "079_router_state.sql")
 	assert.Contains(t, sqlFiles, "080_routed_swaps.sql")
+	assert.Contains(t, sqlFiles, "081_message_resource_context.sql")
 	assert.Contains(t, sqlFiles, "040_editable_vocabulary.sql")
 	assert.Contains(t, sqlFiles, "041_recipient_identities.sql")
 	assert.Contains(t, sqlFiles, "042_recipient_lookup_indexes.sql")
@@ -192,7 +193,8 @@ func TestMigrationFiles(t *testing.T) {
 				name == "077_oracle_feed_metadata.sql" ||
 				name == "078_gnosis_usd_feed.sql" ||
 				name == "079_router_state.sql" ||
-				name == "080_routed_swaps.sql",
+				name == "080_routed_swaps.sql" ||
+				name == "081_message_resource_context.sql",
 			"unexpected migration file %s", name,
 		)
 	}
@@ -282,7 +284,20 @@ func TestMigrationSequenceLoads(t *testing.T) {
 		"078_gnosis_usd_feed.sql",
 		"079_router_state.sql",
 		"080_routed_swaps.sql",
+		"081_message_resource_context.sql",
 	}, files)
+}
+
+func TestMessageResourceContextMigration(t *testing.T) {
+	content, err := os.ReadFile("081_message_resource_context.sql")
+	require.NoError(t, err)
+	up, down, found := strings.Cut(string(content), "---- create above / drop below ----")
+	require.True(t, found)
+	assert.Contains(t, up, "ADD COLUMN resource_context JSONB")
+	assert.Contains(t, up, "jsonb_typeof(resource_context) = 'object'")
+	assert.Contains(t, up, "NULLIF(BTRIM(body), '') IS NOT NULL")
+	assert.Contains(t, up, "resource_context IS NOT NULL")
+	assert.Contains(t, down, "DROP COLUMN resource_context")
 }
 
 func TestRouterStateMigration(t *testing.T) {
