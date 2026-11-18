@@ -181,7 +181,7 @@ ORDER BY lower(COALESCE(NULLIF(BTRIM(u.username), ''), u.blockchain_address)),
 	targets := []OwnerMessageTarget{}
 	for rows.Next() {
 		var target OwnerMessageTarget
-		if err := rows.Scan(&target.Address, &target.Username, &target.Avatar); err != nil {
+		if err := rows.Scan(&target.UserID, &target.Address, &target.Username, &target.Avatar); err != nil {
 			return nil, err
 		}
 		targets = append(targets, target)

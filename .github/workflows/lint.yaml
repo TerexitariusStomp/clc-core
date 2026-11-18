@@ -1,7 +1,11 @@
 name: lint
 
-# Contributors check locally. This runs when a commit lands on develop or master.
+# Contributors check locally. CI repeats the check before and after a merge.
 on:
+  pull_request:
+    branches:
+      - develop
+      - master
   push:
     branches:
       - develop
