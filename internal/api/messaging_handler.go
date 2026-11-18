@@ -221,6 +221,10 @@ func (a *API) validateMessageContext(ctx context.Context, tx pgx.Tx, recipientAd
 	if input.Kind != "pool" && input.Kind != "voucher" && input.Kind != "want" && input.Kind != "catalog" {
 		return nil, messagingInvalid("context.kind must be pool, voucher, want, or catalog")
 	}
+	if input.ProposedVoucherAddress != nil &&
+		(input.Kind != "pool" || !common.IsHexAddress(*input.ProposedVoucherAddress)) {
+		return nil, messagingInvalid("a proposed Voucher requires a Pool context and valid address")
+	}
 	resourceID := input.ResourceID
 	if input.Kind == "pool" || input.Kind == "voucher" {
 		if !common.IsHexAddress(resourceID) {
@@ -253,9 +257,6 @@ func (a *API) validateMessageContext(ctx context.Context, tx pgx.Tx, recipientAd
 		Kind: resource.Kind, ResourceID: resource.ResourceID, ResourceName: resource.ResourceName,
 	}
 	if input.ProposedVoucherAddress != nil {
-		if input.Kind != "pool" || !common.IsHexAddress(*input.ProposedVoucherAddress) {
-			return nil, messagingInvalid("a proposed Voucher requires a Pool context and valid address")
-		}
 		voucher, err := a.store.MessagingVoucherByAddress(ctx, tx, a.chainID, *input.ProposedVoucherAddress)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
