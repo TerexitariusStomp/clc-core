@@ -327,6 +327,7 @@ type (
 		MessagingResourceByID                  string `query:"messaging-resource-by-id"`
 		MessagingVoucherByAddress              string `query:"messaging-voucher-by-address"`
 		MessagingGetConversation               string `query:"messaging-get-conversation"`
+		MessagingDirectConversationIDByPeer    string `query:"messaging-direct-conversation-id-by-peer"`
 		MessagingListConversations             string `query:"messaging-list-conversations"`
 		MessagingUnreadCounts                  string `query:"messaging-unread-counts"`
 		MessagingMemberConversation            string `query:"messaging-member-conversation"`

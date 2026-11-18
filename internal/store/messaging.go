@@ -38,6 +38,7 @@ type (
 		MessagingResourceByID(context.Context, pgx.Tx, int64, string, string) (MessagingResource, error)
 		MessagingVoucherByAddress(context.Context, pgx.Tx, int64, string) (MessagingVoucher, error)
 		GetConversationView(context.Context, pgx.Tx, int64, int64) (ConversationView, error)
+		GetDirectConversationViewByPeer(context.Context, pgx.Tx, int64, string) (ConversationView, error)
 		ListConversationViews(context.Context, pgx.Tx, int64, string, *Keyset, int) ([]ConversationView, error)
 		MessagingUnreadCounts(context.Context, pgx.Tx, int64) (MessagingUnread, error)
 		MemberConversation(context.Context, pgx.Tx, int64, int64, bool) (ConversationMembers, error)
@@ -278,6 +279,16 @@ func (pg *Pg) GetConversationView(ctx context.Context, tx pgx.Tx, caller, id int
 	var view ConversationView
 	err := pgxscan.Get(ctx, tx, &view, pg.queries.MessagingGetConversation, caller, id)
 	return view, err
+}
+
+// GetDirectConversationViewByPeer finds the exact pair and uses the ordinary
+// caller-relative projection for the result, within the same read snapshot.
+func (pg *Pg) GetDirectConversationViewByPeer(ctx context.Context, tx pgx.Tx, caller int64, peerAddress string) (ConversationView, error) {
+	var id int64
+	if err := tx.QueryRow(ctx, pg.queries.MessagingDirectConversationIDByPeer, caller, peerAddress).Scan(&id); err != nil {
+		return ConversationView{}, err
+	}
+	return pg.GetConversationView(ctx, tx, caller, id)
 }
 
 func (pg *Pg) ListConversationViews(ctx context.Context, tx pgx.Tx, caller int64, kind string, after *Keyset, limit int) ([]ConversationView, error) {

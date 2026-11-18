@@ -7096,9 +7096,13 @@ Pass `nextCursor` back as `cursor`. A cursor is opaque. `limit` defaults to 30 a
 
 ### 16.1 `GET /api/v2/conversations`
 
-Query: `kind` (`direct` or `helpdesk`, both when absent), `cursor`, `limit`.
+Query: `kind` (`direct` or `helpdesk`, both when absent), `cursor`, `limit`, `peerAddress`.
 Ordered by last activity (the later of `lastMessageAt` and `updatedAt`), newest first.
 A pending request from someone the caller blocked is left out.
+
+An exact `peerAddress` lookup takes one wallet address and returns only the caller's existing direct conversation with that peer.
+The usual page contains zero or one item and `nextCursor: null`. A caller with no visible conversation receives an empty page.
+Use `kind=direct` or omit `kind`, and omit `cursor`. Invalid combinations return `400`.
 
 ### 16.2 `GET /api/v2/conversations/unread`
 
