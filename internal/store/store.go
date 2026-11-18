@@ -90,6 +90,8 @@ type (
 		SafeManagesAsset(context.Context, pgx.Tx, int64, string, string) (bool, error)
 		SafeExecutionsQueued(context.Context, pgx.Tx, []string) (map[string]bool, error)
 		SetPoolTokenMembership(context.Context, pgx.Tx, string, string, bool, router.Position) ([]router.EdgeKey, error)
+		PoolTokenMembershipStates(context.Context, pgx.Tx, string, string) (map[router.EdgeKey]bool, error)
+		PoolVoucherAdmission(context.Context, pgx.Tx, router.EdgeKey) (PoolVoucherAdmission, error)
 		SetPoolTokenLimit(context.Context, pgx.Tx, string, string, string, router.Position) ([]router.EdgeKey, error)
 		SetPoolTokenOracle(context.Context, pgx.Tx, string, string, string, router.Position) ([]router.EdgeKey, error)
 		ClearPoolTokenOracle(context.Context, pgx.Tx, string, string, router.Position) ([]router.EdgeKey, error)

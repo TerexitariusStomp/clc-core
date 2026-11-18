@@ -3,12 +3,18 @@ package sub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/cosmo-local-credit/clc-core/internal/router"
 	"github.com/cosmo-local-credit/clc-core/internal/store"
+	"github.com/cosmo-local-credit/clc-core/internal/worker"
 	custodialEvent "github.com/cosmo-local-credit/clc-core/pkg/event"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
 	"github.com/grassrootseconomics/eth-tracker/pkg/event"
 	"github.com/jackc/pgx/v5"
 )
@@ -218,7 +224,23 @@ func (s *Sub) projectPoolComposition(ctx context.Context, tx pgx.Tx, chainEvent 
 			return nil, nil
 		}
 		allowed := chainEvent.TxType == indexAddEvent
+		prior := map[router.EdgeKey]bool{}
+		if allowed {
+			prior, err = s.store.PoolTokenMembershipStates(ctx, tx, chainEvent.ContractAddress, token)
+			if err != nil {
+				return nil, err
+			}
+		}
 		keys, err = s.store.SetPoolTokenMembership(ctx, tx, chainEvent.ContractAddress, token, allowed, pos)
+		if err == nil && allowed {
+			for _, key := range keys {
+				if !prior[key] {
+					if err := s.enqueuePoolVoucherAdmission(ctx, tx, chainEvent, key); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
 		deltas = edgeDeltas(keys, func(k router.EdgeKey) router.Delta {
 			return router.EdgeAllowedDelta{Key: k, Allowed: allowed, Pos: pos}
 		})
@@ -283,6 +305,56 @@ func (s *Sub) projectPoolComposition(ctx context.Context, tx pgx.Tx, chainEvent 
 	s.logg.Info("Sub: projected pool composition from chain",
 		"type", chainEvent.TxType, "contract", chainEvent.ContractAddress, "rows", len(keys))
 	return deltas, nil
+}
+
+func (s *Sub) enqueuePoolVoucherAdmission(ctx context.Context, tx pgx.Tx, chainEvent event.Event, key router.EdgeKey) error {
+	// Lightweight projection unit tests construct Sub directly without the
+	// production River outbox. NewSub always receives the configured client.
+	if s.queueClient == nil {
+		return nil
+	}
+	admission, err := s.store.PoolVoucherAdmission(ctx, tx, key)
+	if err != nil {
+		return err
+	}
+	owners := []string{admission.PoolOwner, admission.VoucherOwner}
+	audienceByAddress := map[string]custodialEvent.MessagingAudience{}
+	for _, owner := range owners {
+		targets, err := s.store.ListOwnerMessageTargets(ctx, tx, s.chainID, owner)
+		if err != nil {
+			return err
+		}
+		for _, target := range targets {
+			audienceByAddress[strings.ToLower(target.Address)] = custodialEvent.MessagingAudience{
+				UserID: target.UserID, Address: target.Address, Push: true,
+			}
+		}
+	}
+	addresses := make([]string, 0, len(audienceByAddress))
+	for address := range audienceByAddress {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+	for _, address := range addresses {
+		audience := audienceByAddress[address]
+		dedupeKey := fmt.Sprintf("pool-voucher-admitted:%d:%s:%d:%s", s.chainID,
+			strings.ToLower(chainEvent.TxHash), eventPosition(chainEvent).LogIndex, address)
+		eventID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(dedupeKey)).String()
+		ev := custodialEvent.MessagingEvent{
+			EventID: eventID, Kind: custodialEvent.PoolVoucherAdmitted,
+			OccurredAt:     time.Unix(int64(chainEvent.Timestamp), 0).UTC().Format(time.RFC3339),
+			ConversationID: 0,
+			Audience:       []custodialEvent.MessagingAudience{audience},
+			Resource: &custodialEvent.MessagingResource{
+				Kind: "pool", Address: admission.PoolAddress, Name: admission.PoolName,
+				VoucherAddress: admission.VoucherAddress, VoucherName: admission.VoucherName,
+			},
+		}
+		if err := worker.EnqueueMessagingEvent(ctx, s.queueClient, tx, ev); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func payloadAddress(chainEvent event.Event, key string) (string, bool) {

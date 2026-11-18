@@ -10,6 +10,7 @@ const (
 	HelpdeskStatusChanged  = "helpdesk.status_changed"
 	ConversationRead       = "conversation.read"
 	BlockChanged           = "block.changed"
+	PoolVoucherAdmitted    = "pool.voucher_admitted"
 	MessagingStream        = "MESSAGING"
 	MessagingSubjectPrefix = MessagingStream + "."
 )
@@ -29,6 +30,7 @@ type (
 		MessageID        *int64              `json:"messageId,omitempty"`
 		Actor            MessagingActor      `json:"actor"`
 		Audience         []MessagingAudience `json:"audience"`
+		Resource         *MessagingResource  `json:"resource,omitempty"`
 	}
 
 	MessagingActor struct {
@@ -42,5 +44,13 @@ type (
 		UserID  int64  `json:"userId"`
 		Address string `json:"address"`
 		Push    bool   `json:"push"`
+	}
+
+	MessagingResource struct {
+		Kind           string `json:"kind"`
+		Address        string `json:"address"`
+		Name           string `json:"name"`
+		VoucherAddress string `json:"voucherAddress,omitempty"`
+		VoucherName    string `json:"voucherName,omitempty"`
 	}
 )

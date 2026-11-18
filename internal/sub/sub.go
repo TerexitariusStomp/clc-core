@@ -10,6 +10,7 @@ import (
 	"github.com/cosmo-local-credit/clc-core/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/riverqueue/river"
 )
 
 type (
@@ -29,7 +30,8 @@ type (
 		RefreshSafe func(ctx context.Context, tx pgx.Tx, address string, minBlock uint64, register bool) error
 		// Router receives graph deltas after each event commits; nil runs
 		// without one.
-		Router RouterSink
+		Router      RouterSink
+		QueueClient *river.Client[pgx.Tx]
 	}
 
 	Sub struct {
@@ -38,6 +40,7 @@ type (
 		registerSafe func(context.Context, pgx.Tx, string) error
 		refreshSafe  func(ctx context.Context, tx pgx.Tx, address string, minBlock uint64, register bool) error
 		router       RouterSink
+		queueClient  *river.Client[pgx.Tx]
 		store        store.Store
 		js           jetstream.JetStream
 		jsIter       jetstream.MessagesContext
@@ -96,6 +99,7 @@ func NewSub(o SubObts) (*Sub, error) {
 		registerSafe: o.RegisterSafe,
 		refreshSafe:  o.RefreshSafe,
 		router:       o.Router,
+		queueClient:  o.QueueClient,
 		store:        o.Store,
 		js:           o.JS,
 		jsIter:       iter,

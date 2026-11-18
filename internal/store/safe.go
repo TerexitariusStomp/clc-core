@@ -25,6 +25,7 @@ type (
 	// account that can receive a message for an owner address. For a Safe these
 	// are its current projected signers; for an EOA this is the owner itself.
 	OwnerMessageTarget struct {
+		UserID   int64   `db:"id"                 json:"-"`
 		Address  string  `db:"blockchain_address" json:"address"`
 		Username *string `db:"username"           json:"username"`
 		Avatar   *string `db:"avatar_url"         json:"avatar"`
@@ -163,7 +164,7 @@ WITH owner_kind AS (
         WHERE chain_id = $1 AND safe_address = lower($2)
     ) AS is_safe
 )
-SELECT u.blockchain_address, u.username, u.avatar_url
+SELECT u.id, u.blockchain_address, u.username, u.avatar_url
 FROM users u CROSS JOIN owner_kind k
 WHERE u.status = 'APPROVED' AND NOT user_retiring(u.id)
   AND ((NOT k.is_safe AND lower(u.blockchain_address) = lower($2))

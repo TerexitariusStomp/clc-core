@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -57,13 +58,14 @@ type (
 	}
 
 	messagingMessage struct {
-		ID             int64     `json:"id"`
-		ConversationID int64     `json:"conversationId"`
-		ClientID       string    `json:"clientId"`
-		Sender         string    `json:"sender"`
-		Body           *string   `json:"body"`
-		ImageURLs      []string  `json:"imageUrls"`
-		CreatedAt      time.Time `json:"createdAt"`
+		ID             int64                     `json:"id"`
+		ConversationID int64                     `json:"conversationId"`
+		ClientID       string                    `json:"clientId"`
+		Sender         string                    `json:"sender"`
+		Body           *string                   `json:"body"`
+		ImageURLs      []string                  `json:"imageUrls"`
+		Context        *messagingResourceContext `json:"context"`
+		CreatedAt      time.Time                 `json:"createdAt"`
 	}
 
 	messagingConversation struct {
@@ -130,6 +132,26 @@ type (
 		ClientID  string
 		Body      *string
 		ImageURLs []string
+		Context   *messagingContextInput
+	}
+
+	messagingContextInput struct {
+		Kind                   string  `json:"kind"`
+		ResourceID             string  `json:"resourceId"`
+		ProposedVoucherAddress *string `json:"proposedVoucherAddress,omitempty"`
+	}
+
+	messagingVoucherContext struct {
+		Address string `json:"address"`
+		Name    string `json:"name"`
+		Symbol  string `json:"symbol"`
+	}
+
+	messagingResourceContext struct {
+		Kind            string                   `json:"kind"`
+		ResourceID      string                   `json:"resourceId"`
+		ResourceName    string                   `json:"resourceName"`
+		ProposedVoucher *messagingVoucherContext `json:"proposedVoucher,omitempty"`
 	}
 
 	// messagingError is a response already decided by validation.
@@ -252,9 +274,10 @@ func optionalMessagingText(raw *string, limit int, field string) (*string, error
 
 func parseMessageInput(c *echo.Context) (messageInput, error) {
 	var req struct {
-		ClientID  string   `json:"clientId"`
-		Body      *string  `json:"body"`
-		ImageURLs []string `json:"imageUrls"`
+		ClientID  string                 `json:"clientId"`
+		Body      *string                `json:"body"`
+		ImageURLs []string               `json:"imageUrls"`
+		Context   *messagingContextInput `json:"context"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return messageInput{}, messagingFailure(http.StatusBadRequest, apiresp.ErrCodeInvalidJSON, "Invalid or malformed request")
@@ -263,7 +286,7 @@ func parseMessageInput(c *echo.Context) (messageInput, error) {
 	if err != nil {
 		return messageInput{}, messagingInvalid("clientId must be a UUID")
 	}
-	input := messageInput{ClientID: clientID.String(), ImageURLs: []string{}}
+	input := messageInput{ClientID: clientID.String(), ImageURLs: []string{}, Context: req.Context}
 
 	// The body is stored as written; whitespace alone counts as no text.
 	if req.Body != nil && strings.TrimSpace(*req.Body) != "" {
@@ -282,10 +305,21 @@ func parseMessageInput(c *echo.Context) (messageInput, error) {
 		}
 		input.ImageURLs = append(input.ImageURLs, imageURL)
 	}
-	if input.Body == nil && len(input.ImageURLs) == 0 {
-		return messageInput{}, messagingInvalid("a message needs text or an image")
+	if input.Body == nil && len(input.ImageURLs) == 0 && input.Context == nil {
+		return messageInput{}, messagingInvalid("a message needs text, an image, or resource context")
 	}
 	return input, nil
+}
+
+func parseResourceContext(raw json.RawMessage) *messagingResourceContext {
+	if len(raw) == 0 {
+		return nil
+	}
+	var context messagingResourceContext
+	if json.Unmarshal(raw, &context) != nil {
+		return nil
+	}
+	return &context
 }
 
 func parseMessagingLimit(raw string, fallback int) (int, error) {
@@ -391,6 +425,7 @@ func userMessageWire(kind string, caller int64, m store.Message) messagingMessag
 		Sender:         userMessageSender(kind, m.SenderUserID, caller),
 		Body:           m.Body,
 		ImageURLs:      nonNilImages(m.ImageURLs),
+		Context:        parseResourceContext(m.Context),
 		CreatedAt:      m.CreatedAt.UTC(),
 	}
 }
@@ -424,6 +459,7 @@ func conversationWire(v store.ConversationView, caller int64) messagingConversat
 			ClientID:       derefString(v.LastMessageClientID),
 			Body:           v.LastMessageBody,
 			ImageURLs:      v.LastMessageImageURLs,
+			Context:        v.LastMessageContext,
 			CreatedAt:      derefTime(v.LastMessageCreatedAt),
 		})
 		out.LastMessage = &last
