@@ -11,6 +11,9 @@ const (
 	ConversationRead       = "conversation.read"
 	BlockChanged           = "block.changed"
 	PoolVoucherAdmitted    = "pool.voucher_admitted"
+	SafeProposed           = "safe.proposed"
+	SafeConfirmed          = "safe.confirmed"
+	SafeApproved           = "safe.approved"
 	MessagingStream        = "MESSAGING"
 	MessagingSubjectPrefix = MessagingStream + "."
 )
@@ -22,15 +25,17 @@ type (
 	// ConversationID is 0 when there is no conversation, e.g. a block between
 	// two people who never had one. MessageID is set only on message.created.
 	MessagingEvent struct {
-		EventID          string              `json:"eventId"`
-		Kind             string              `json:"kind"`
-		OccurredAt       string              `json:"occurredAt"`
-		ConversationID   int64               `json:"conversationId"`
-		ConversationKind string              `json:"conversationKind"`
-		MessageID        *int64              `json:"messageId,omitempty"`
-		Actor            MessagingActor      `json:"actor"`
-		Audience         []MessagingAudience `json:"audience"`
-		Resource         *MessagingResource  `json:"resource,omitempty"`
+		EventID          string                 `json:"eventId"`
+		Kind             string                 `json:"kind"`
+		OccurredAt       string                 `json:"occurredAt"`
+		ConversationID   int64                  `json:"conversationId"`
+		ConversationKind string                 `json:"conversationKind"`
+		MessageID        *int64                 `json:"messageId,omitempty"`
+		Actor            MessagingActor         `json:"actor"`
+		Audience         []MessagingAudience    `json:"audience"`
+		Resource         *MessagingResource     `json:"resource,omitempty"`
+		Resources        []MessagingResource    `json:"resources,omitempty"`
+		SafeApproval     *MessagingSafeApproval `json:"safeApproval,omitempty"`
 	}
 
 	MessagingActor struct {
@@ -52,5 +57,14 @@ type (
 		Name           string `json:"name"`
 		VoucherAddress string `json:"voucherAddress,omitempty"`
 		VoucherName    string `json:"voucherName,omitempty"`
+	}
+
+	MessagingSafeApproval struct {
+		SafeAddress       string `json:"safeAddress"`
+		SafeTxHash        string `json:"safeTxHash"`
+		Stage             string `json:"stage"`
+		Approvals         int    `json:"approvals"`
+		ApprovalsRequired int    `json:"approvalsRequired"`
+		Proposed          bool   `json:"proposed"`
 	}
 )

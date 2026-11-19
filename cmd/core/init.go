@@ -166,6 +166,9 @@ func loadWorker(pgStore store.Store, federationStore store.FederationStore, chai
 		ChainID:             ko.MustInt64("chain.id"),
 		SafeExecutor:        loadSafeExecutor(pgStore, chainProvider),
 		MessagingPublisher:  pubInst,
+		SafeSTSURL:          ko.String("safe.sts_base_url"),
+		SafeSTSKey:          ko.String("safe.sts_api_key"),
+		SafeMultiSend:       ko.Strings("safe.multisend_call_only"),
 	})
 	if err := workerContainer.Bootstrap(); err != nil {
 		lo.Error("could not initialize worker container", "error", err)

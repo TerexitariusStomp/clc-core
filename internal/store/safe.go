@@ -30,6 +30,12 @@ type (
 		Username *string `db:"username"           json:"username"`
 		Avatar   *string `db:"avatar_url"         json:"avatar"`
 	}
+
+	SafeApprovalResource struct {
+		Kind    string
+		Address string
+		Name    string
+	}
 )
 
 // ReplaceSafeSigners installs a Safe's full signer set, but only when the
@@ -151,6 +157,90 @@ ORDER BY s.safe_address`, chainID, signer)
 		states = append(states, state)
 	}
 	return states, rows.Err()
+}
+
+// ListSafeStates returns every known Safe and its current signer projection.
+// It is used only by the bounded Safe Transaction Service reconciliation job.
+func (pg *Pg) ListSafeStates(ctx context.Context, tx pgx.Tx, chainID int64) ([]SafeState, error) {
+	rows, err := tx.Query(ctx, `
+SELECT s.safe_address, COALESCE(s.threshold, 0), s.block_number, s.refreshed_at,
+       array_agg(member.signer ORDER BY member.signer)
+FROM safe_state s
+JOIN safe_signers member ON member.chain_id = s.chain_id AND member.safe_address = s.safe_address
+WHERE s.chain_id = $1
+GROUP BY s.safe_address, s.threshold, s.block_number, s.refreshed_at
+ORDER BY s.safe_address`, chainID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var states []SafeState
+	for rows.Next() {
+		var state SafeState
+		var block int64
+		if err := rows.Scan(&state.Address, &state.Threshold, &block, &state.RefreshedAt, &state.Signers); err != nil {
+			return nil, err
+		}
+		state.Block = uint64(block)
+		states = append(states, state)
+	}
+	return states, rows.Err()
+}
+
+// ListSafeApprovalResources resolves managed transaction targets to their
+// public Voucher or Pool. Pool wiring contracts collapse to the parent Pool.
+// A Safe self-management call can affect every resource it owns.
+func (pg *Pg) ListSafeApprovalResources(ctx context.Context, tx pgx.Tx, chainID int64, safe string, targets []string, includeAllOwned bool) ([]SafeApprovalResource, error) {
+	rows, err := tx.Query(ctx, `
+WITH target(address) AS (SELECT unnest($3::text[])), resources AS (
+    SELECT 'voucher'::text AS kind, lower(v.address) AS address,
+           COALESCE(v.display_name, v.name) AS name
+    FROM vouchers v
+    WHERE v.chain_id = $1 AND lower(v.owner_address) = lower($2)
+      AND ($4 OR lower(v.address) IN (SELECT lower(address) FROM target))
+    UNION ALL
+    SELECT 'pool'::text, lower(p.address), COALESCE(p.display_name, p.name)
+    FROM pools p
+    WHERE p.chain_id = $1 AND lower(p.owner_address) = lower($2)
+      AND ($4 OR EXISTS (
+          SELECT 1 FROM target t WHERE lower(t.address) IN (
+              lower(p.address), lower(p.token_registry_address), lower(p.limiter_address),
+              lower(p.fee_policy_address), lower(p.quoter_address),
+              lower(p.protocol_fee_controller_address))))
+)
+SELECT kind, address, name FROM resources ORDER BY kind, lower(name), address`, chainID, safe, targets, includeAllOwned)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var resources []SafeApprovalResource
+	for rows.Next() {
+		var resource SafeApprovalResource
+		if err := rows.Scan(&resource.Kind, &resource.Address, &resource.Name); err != nil {
+			return nil, err
+		}
+		resources = append(resources, resource)
+	}
+	return resources, rows.Err()
+}
+
+// RecordSafeApprovalMilestone atomically claims one signer milestone. Events
+// older than the rollout activation time are recorded as seen but not emitted.
+func (pg *Pg) RecordSafeApprovalMilestone(ctx context.Context, tx pgx.Tx, chainID int64, safeTxHash, signer, eventID string, occurredAt time.Time) (bool, error) {
+	var emit bool
+	err := tx.QueryRow(ctx, `
+WITH inserted AS (
+    INSERT INTO safe_approval_milestones
+        (chain_id, safe_tx_hash, signer_address, event_id, occurred_at)
+    VALUES ($1, lower($2), lower($3), $4, $5)
+    ON CONFLICT (chain_id, safe_tx_hash, signer_address) DO NOTHING
+    RETURNING occurred_at
+)
+SELECT EXISTS (
+    SELECT 1 FROM inserted i CROSS JOIN safe_approval_notification_config c
+    WHERE c.singleton AND i.occurred_at >= c.activated_at
+)`, chainID, safeTxHash, signer, eventID, occurredAt).Scan(&emit)
+	return emit, err
 }
 
 // ListOwnerMessageTargets returns only public identities that the messaging

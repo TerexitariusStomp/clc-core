@@ -5,7 +5,9 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
@@ -124,4 +126,47 @@ func TestListSafesSignedByDB(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, safes, 1)
 	require.Equal(t, lower(second), safes[0].Address)
+}
+
+func TestSafeApprovalMilestonesAndResourcesDB(t *testing.T) {
+	pg, tx, cleanup := newMarketTestPg(t)
+	defer cleanup()
+	ctx := context.Background()
+	poolID, voucherID, registry, _, _, pool, token := seedComposablePool(t, tx)
+	safeAddr, signer := randomAddress(t, tx), randomAddress(t, tx)
+	_, err := tx.Exec(ctx, `UPDATE pools SET owner_address=$2 WHERE id=$1`, poolID, safeAddr)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `UPDATE vouchers SET owner_address=$2 WHERE id=$1`, voucherID, safeAddr)
+	require.NoError(t, err)
+	_, err = pg.ReplaceSafeSigners(ctx, tx, 42220, safeAddr, []string{signer}, 1, 10, 0)
+	require.NoError(t, err)
+
+	states, err := pg.ListSafeStates(ctx, tx, 42220)
+	require.NoError(t, err)
+	require.Len(t, states, 1)
+	require.Equal(t, lower(safeAddr), states[0].Address)
+
+	resources, err := pg.ListSafeApprovalResources(ctx, tx, 42220, safeAddr, []string{registry, token}, false)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []SafeApprovalResource{
+		{Kind: "pool", Address: lower(pool), Name: "Composable"},
+		{Kind: "voucher", Address: lower(token), Name: "Composable Voucher"},
+	}, resources)
+
+	resources, err = pg.ListSafeApprovalResources(ctx, tx, 42220, safeAddr, nil, true)
+	require.NoError(t, err)
+	require.Len(t, resources, 2, "a Safe self-management action names all managed resources")
+
+	hash := "0x" + strings.Repeat("a", 64)
+	now := time.Now().UTC().Add(time.Second)
+	emit, err := pg.RecordSafeApprovalMilestone(ctx, tx, 42220, hash, signer, uuid.NewString(), now)
+	require.NoError(t, err)
+	require.True(t, emit)
+	emit, err = pg.RecordSafeApprovalMilestone(ctx, tx, 42220, hash, signer, uuid.NewString(), now)
+	require.NoError(t, err)
+	require.False(t, emit, "the same signer milestone is permanently deduplicated")
+
+	emit, err = pg.RecordSafeApprovalMilestone(ctx, tx, 42220, "0x"+strings.Repeat("b", 64), signer, uuid.NewString(), time.Unix(1, 0))
+	require.NoError(t, err)
+	require.False(t, emit, "pre-rollout confirmations are recorded without replaying a notification")
 }

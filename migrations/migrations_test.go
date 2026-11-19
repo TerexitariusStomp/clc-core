@@ -89,6 +89,7 @@ func TestMigrationFiles(t *testing.T) {
 	assert.Contains(t, sqlFiles, "079_router_state.sql")
 	assert.Contains(t, sqlFiles, "080_routed_swaps.sql")
 	assert.Contains(t, sqlFiles, "081_message_resource_context.sql")
+	assert.Contains(t, sqlFiles, "082_safe_approval_milestones.sql")
 	assert.Contains(t, sqlFiles, "040_editable_vocabulary.sql")
 	assert.Contains(t, sqlFiles, "041_recipient_identities.sql")
 	assert.Contains(t, sqlFiles, "042_recipient_lookup_indexes.sql")
@@ -194,7 +195,8 @@ func TestMigrationFiles(t *testing.T) {
 				name == "078_gnosis_usd_feed.sql" ||
 				name == "079_router_state.sql" ||
 				name == "080_routed_swaps.sql" ||
-				name == "081_message_resource_context.sql",
+				name == "081_message_resource_context.sql" ||
+				name == "082_safe_approval_milestones.sql",
 			"unexpected migration file %s", name,
 		)
 	}
@@ -285,6 +287,7 @@ func TestMigrationSequenceLoads(t *testing.T) {
 		"079_router_state.sql",
 		"080_routed_swaps.sql",
 		"081_message_resource_context.sql",
+		"082_safe_approval_milestones.sql",
 	}, files)
 }
 
