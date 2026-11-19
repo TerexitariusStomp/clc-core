@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/labstack/echo/v5"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -363,9 +364,9 @@ func TestConfirmationReachingTheThresholdQueuesExecution(t *testing.T) {
 			f.sts.stored.ConfirmationsRequired = 2
 			f.sts.stored.Confirmations = make([]safe.Confirmation, tc.confirmations)
 			var calls []string
-			f.svc.execute = func(_ context.Context, safeAddress, safeTxHash string) bool {
+			f.svc.requestExecution = func(_ context.Context, safeAddress, safeTxHash string) safe.ExecutionState {
 				calls = append(calls, safeAddress+":"+safeTxHash)
-				return true
+				return safe.ExecutionQueued
 			}
 			hash := common.HexToHash(f.sts.stored.SafeTxHash)
 			tx, err := f.svc.confirm(context.Background(), f.key, safeConfirmationRequest{SafeTxHash: hash.Hex(), Signature: f.sign(hash)})
@@ -389,7 +390,10 @@ func TestProposalOfAThresholdOneSafeQueuesExecution(t *testing.T) {
 	f.sts.stored = &safe.Transaction{Safe: proxySafe.Hex(), SafeTxHash: req.SafeTxHash, TxFields: req.Tx,
 		ConfirmationsRequired: 1, Confirmations: make([]safe.Confirmation, 1)}
 	queued := 0
-	f.svc.execute = func(context.Context, string, string) bool { queued++; return true }
+	f.svc.requestExecution = func(context.Context, string, string) safe.ExecutionState {
+		queued++
+		return safe.ExecutionQueued
+	}
 	tx, err := f.svc.propose(context.Background(), f.key, req)
 	if err != nil {
 		t.Fatal(err)
@@ -399,8 +403,9 @@ func TestProposalOfAThresholdOneSafeQueuesExecution(t *testing.T) {
 	}
 }
 
-// A transaction confirmed while execution was off is picked up when listed.
-func TestPendingQueuesExecutionForTransactionsAlreadyAtTheirThreshold(t *testing.T) {
+// Reading pending transactions is side-effect free. Reconciliation is what
+// recovers a missed final-confirmation trigger.
+func TestPendingReportsExecutionWithoutQueuingIt(t *testing.T) {
 	f := newProxyFixture(t, true)
 	ready := storedFor(t, txFor(proxyAsset, ownershipCall()))
 	ready.ConfirmationsRequired = 2
@@ -412,22 +417,22 @@ func TestPendingQueuesExecutionForTransactionsAlreadyAtTheirThreshold(t *testing
 	queuedAlready.ConfirmationsRequired = 2
 	queuedAlready.Confirmations = make([]safe.Confirmation, 2)
 	f.sts.queued = []safe.Transaction{*ready, *short, *queuedAlready}
-	f.svc.executing = func(_ context.Context, hashes []string) map[string]bool {
-		return map[string]bool{hashes[2]: true}
+	f.svc.executionStates = func(_ context.Context, hashes []string) map[string]safe.ExecutionState {
+		return map[string]safe.ExecutionState{hashes[2]: safe.ExecutionQueued}
 	}
 	var calls []string
-	f.svc.execute = func(_ context.Context, _, safeTxHash string) bool {
+	f.svc.requestExecution = func(_ context.Context, _, safeTxHash string) safe.ExecutionState {
 		calls = append(calls, safeTxHash)
-		return true
+		return safe.ExecutionQueued
 	}
 	got, err := f.svc.pending(context.Background(), f.key, proxySafe.Hex())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 1 || calls[0] != ready.SafeTxHash {
-		t.Fatalf("queued %v, want only %s", calls, ready.SafeTxHash)
+	if len(calls) != 0 {
+		t.Fatalf("a GET queued executions: %v", calls)
 	}
-	if !got[0].Executing || got[1].Executing || !got[2].Executing {
+	if got[0].Executing || got[1].Executing || got[2].ExecutionState != safe.ExecutionWaiting {
 		t.Fatalf("executing flags %v %v %v", got[0].Executing, got[1].Executing, got[2].Executing)
 	}
 }
@@ -436,17 +441,72 @@ func TestPendingReportsWhichTransactionsAreExecuting(t *testing.T) {
 	f := newProxyFixture(t, true)
 	a := storedFor(t, txFor(proxyAsset, ownershipCall()))
 	b := storedFor(t, func() safe.TxFields { tx := txFor(proxyAsset, ownershipCall()); tx.Nonce = "5"; return tx }())
+	for _, tx := range []*safe.Transaction{a, b} {
+		tx.ConfirmationsRequired = 1
+		tx.Confirmations = make([]safe.Confirmation, 1)
+	}
 	f.sts.queued = []safe.Transaction{*a, *b}
-	f.svc.executing = func(_ context.Context, hashes []string) map[string]bool {
-		return map[string]bool{hashes[1]: true}
+	f.svc.executionStates = func(_ context.Context, hashes []string) map[string]safe.ExecutionState {
+		return map[string]safe.ExecutionState{hashes[0]: safe.ExecutionReady, hashes[1]: safe.ExecutionQueued}
 	}
 	got, err := f.svc.pending(context.Background(), f.key, proxySafe.Hex())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].Executing || !got[1].Executing {
+	if len(got) != 2 || got[0].ExecutionState != safe.ExecutionReady || got[1].ExecutionState != safe.ExecutionWaiting {
 		t.Fatalf("executing flags %v %v", got[0].Executing, got[1].Executing)
 	}
+}
+
+func TestExecuteTransactionQueuesOrRetriesOnlyAReadyApprovedProposal(t *testing.T) {
+	f := newProxyFixture(t, true)
+	f.sts.stored = storedFor(t, txFor(proxyAsset, ownershipCall()))
+	f.sts.stored.ConfirmationsRequired = 2
+	f.sts.stored.Confirmations = make([]safe.Confirmation, 2)
+	calls := 0
+	f.svc.requestExecution = func(_ context.Context, safeAddress, safeTxHash string) safe.ExecutionState {
+		calls++
+		require.Equal(t, proxySafe.Hex(), safeAddress)
+		require.Equal(t, f.sts.stored.SafeTxHash, safeTxHash)
+		return safe.ExecutionQueued
+	}
+
+	got, err := f.svc.executeTransaction(context.Background(), f.key, f.sts.stored.SafeTxHash)
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+	require.Equal(t, safe.ExecutionQueued, got.ExecutionState)
+	require.True(t, got.Executing)
+}
+
+func TestExecuteTransactionWaitsForTheEarlierSafeNonce(t *testing.T) {
+	f := newProxyFixture(t, true)
+	fields := txFor(proxyAsset, ownershipCall())
+	fields.Nonce = "5"
+	f.sts.stored = storedFor(t, fields)
+	f.sts.stored.ConfirmationsRequired = 1
+	f.sts.stored.Confirmations = make([]safe.Confirmation, 1)
+	f.svc.requestExecution = func(context.Context, string, string) safe.ExecutionState {
+		t.Fatal("later nonce was queued")
+		return ""
+	}
+
+	got, err := f.svc.executeTransaction(context.Background(), f.key, f.sts.stored.SafeTxHash)
+	require.NoError(t, err)
+	require.Equal(t, safe.ExecutionWaiting, got.ExecutionState)
+}
+
+func TestExecuteTransactionRejectsAnUnapprovedProposal(t *testing.T) {
+	f := newProxyFixture(t, true)
+	f.sts.stored = storedFor(t, txFor(proxyAsset, ownershipCall()))
+	f.sts.stored.ConfirmationsRequired = 2
+	f.sts.stored.Confirmations = make([]safe.Confirmation, 1)
+	f.svc.requestExecution = func(context.Context, string, string) safe.ExecutionState {
+		t.Fatal("unapproved transaction was queued")
+		return ""
+	}
+
+	_, err := f.svc.executeTransaction(context.Background(), f.key, f.sts.stored.SafeTxHash)
+	require.Equal(t, http.StatusConflict, status(t, err))
 }
 
 func (f fakeContractVerifier) Accepts(context.Context) (bool, error) { return f.accepts, f.acceptsErr }

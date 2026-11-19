@@ -36,6 +36,14 @@ type (
 		Address string
 		Name    string
 	}
+
+	SafeExecutionProgress struct {
+		JobID        int64
+		JobState     string
+		OTXActive    bool
+		OTXSucceeded bool
+		OTXFailed    bool
+	}
 )
 
 // ReplaceSafeSigners installs a Safe's full signer set, but only when the
@@ -306,25 +314,54 @@ SELECT EXISTS (
 	return ok, err
 }
 
-// SafeExecutionsQueued reports which Safe transactions clc-core has queued or
-// sent for execution. A cancelled or discarded job is not executing: the Safe
-// app is the way forward for it.
-func (pg *Pg) SafeExecutionsQueued(ctx context.Context, tx pgx.Tx, safeTxHashes []string) (map[string]bool, error) {
+// SafeExecutionProgresses separates an active queue job from a finalized one
+// and from the OTX it submitted. River retains completed jobs, so treating
+// every non-cancelled row as active leaves clients displaying "Executing…"
+// long after there is no work left to run.
+func (pg *Pg) SafeExecutionProgresses(ctx context.Context, tx pgx.Tx, safeTxHashes, trackingIDs []string) (map[string]SafeExecutionProgress, error) {
+	if len(safeTxHashes) != len(trackingIDs) {
+		return nil, fmt.Errorf("safe execution progress: hashes and tracking IDs differ in length")
+	}
 	rows, err := tx.Query(ctx, `
-SELECT DISTINCT args->>'safeTxHash' FROM river_job
-WHERE kind = 'SAFE_EXECUTE' AND args->>'safeTxHash' = ANY($1::text[])
-    AND state NOT IN ('cancelled', 'discarded')`, safeTxHashes)
+WITH requested AS (
+    SELECT lower(hash) AS hash, tracking_id
+    FROM unnest($1::text[], $2::text[]) AS item(hash, tracking_id)
+)
+SELECT requested.hash,
+       COALESCE(job.id, 0), COALESCE(job.state, ''),
+       COALESCE(bool_or(otx.id IS NOT NULL AND
+           (dispatch.status IS NULL OR dispatch.status NOT IN ('SUCCESS', 'REVERTED', 'LOW_NONCE', 'INVALID_TX'))), false),
+       COALESCE(bool_or(dispatch.status = 'SUCCESS'), false),
+       COALESCE(bool_or(dispatch.status IN ('REVERTED', 'LOW_NONCE', 'INVALID_TX')), false)
+FROM requested
+LEFT JOIN LATERAL (
+    SELECT id, state::text AS state
+    FROM river_job
+    WHERE kind = 'SAFE_EXECUTE' AND lower(args->>'safeTxHash') = requested.hash
+    ORDER BY id DESC
+    LIMIT 1
+) AS job ON true
+LEFT JOIN otx ON otx.tracking_id::text = requested.tracking_id
+LEFT JOIN LATERAL (
+    SELECT status
+    FROM dispatch
+    WHERE dispatch.otx_id = otx.id
+    ORDER BY dispatch.id DESC
+    LIMIT 1
+) AS dispatch ON true
+GROUP BY requested.hash, job.id, job.state`, safeTxHashes, trackingIDs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	queued := make(map[string]bool, len(safeTxHashes))
+	progress := make(map[string]SafeExecutionProgress, len(safeTxHashes))
 	for rows.Next() {
 		var hash string
-		if err := rows.Scan(&hash); err != nil {
+		var item SafeExecutionProgress
+		if err := rows.Scan(&hash, &item.JobID, &item.JobState, &item.OTXActive, &item.OTXSucceeded, &item.OTXFailed); err != nil {
 			return nil, err
 		}
-		queued[hash] = true
+		progress[hash] = item
 	}
-	return queued, rows.Err()
+	return progress, rows.Err()
 }

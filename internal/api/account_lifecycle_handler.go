@@ -102,6 +102,7 @@ var (
 		"PUT " + apiVersion + "/retirement-requests/:id/cancel":         {},
 		"POST " + apiVersion + "/safe/proposals":                        {},
 		"POST " + apiVersion + "/safe/confirmations":                    {},
+		"POST " + apiVersion + "/safe/transactions/:safeTxHash/execute": {},
 	}
 
 	// recoveryBlockedReads are reads that belong to normal activity rather than

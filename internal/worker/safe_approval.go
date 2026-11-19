@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 const (
@@ -59,6 +60,13 @@ type (
 func (SafeApprovalSyncArgs) Kind() string      { return "SAFE_APPROVAL_SYNC" }
 func (SafeApprovalReconcileArgs) Kind() string { return "SAFE_APPROVAL_RECONCILE" }
 
+func safeApprovalSyncInsertOpts() *river.InsertOpts {
+	return &river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true, ByState: []rivertype.JobState{
+		rivertype.JobStateAvailable, rivertype.JobStatePending, rivertype.JobStateRunning,
+		rivertype.JobStateRetryable, rivertype.JobStateScheduled,
+	}}}
+}
+
 func EnqueueSafeApprovalSync(ctx context.Context, queue *river.Client[pgx.Tx], safeAddress, safeTxHash string) error {
 	if queue == nil {
 		return errors.New("safe approval sync: no queue client")
@@ -72,7 +80,7 @@ func EnqueueSafeApprovalSync(ctx context.Context, queue *river.Client[pgx.Tx], s
 	_, err := queue.Insert(ctx, SafeApprovalSyncArgs{
 		SafeAddress: common.HexToAddress(safeAddress).Hex(),
 		SafeTxHash:  strings.ToLower(safeTxHash),
-	}, &river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true}})
+	}, safeApprovalSyncInsertOpts())
 	return err
 }
 
@@ -171,6 +179,12 @@ func (w *SafeApprovalSyncWorker) syncTransaction(ctx context.Context, safeTx *sa
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if w.wc.safeExecutor != nil && !safeTx.IsExecuted && safeTx.ConfirmationsRequired > 0 &&
+		len(confirmations) >= safeTx.ConfirmationsRequired {
+		if err := EnqueueSafeExecutionTx(ctx, w.wc.queueClient, tx, safeTx.Safe, safeTx.SafeTxHash); err != nil {
+			return err
+		}
+	}
 	audience, err := w.wc.store.ListOwnerMessageTargets(ctx, tx, w.wc.chainID, safeTx.Safe)
 	if err != nil {
 		return err

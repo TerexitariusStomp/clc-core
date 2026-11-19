@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"math/big"
 	"net/http"
 	"regexp"
 	"strings"
@@ -49,12 +50,12 @@ type (
 		policy  *safe.Policy
 		sts     safeSTSClient
 		signers safeSignerSource
-		// execute queues clc-core's execution of a confirmed transaction and
-		// executing reports which are queued; both nil leaves execution to
-		// the Safe app.
-		execute      func(ctx context.Context, safe, safeTxHash string) bool
-		executing    func(ctx context.Context, safeTxHashes []string) map[string]bool
-		syncApproval func(ctx context.Context, safe, safeTxHash string)
+		// requestExecution queues or retries sponsored execution, while
+		// executionStates reports its durable lifecycle. Both nil leaves
+		// execution to the Safe app for backward-compatible deployments.
+		requestExecution func(ctx context.Context, safe, safeTxHash string) safe.ExecutionState
+		executionStates  func(ctx context.Context, safeTxHashes []string) map[string]safe.ExecutionState
+		syncApproval     func(ctx context.Context, safe, safeTxHash string)
 		// contracts verifies contract (v 0) signatures against a Safe at the
 		// latest block; nil rejects them.
 		contracts func(safe common.Address) safe.ContractVerifier
@@ -239,24 +240,37 @@ func (s *safeService) propose(ctx context.Context, caller string, req safePropos
 // clc-core's executor. The caller's signature is recorded either way; a failed
 // enqueue leaves execution to the Safe app.
 func (s *safeService) queueExecution(ctx context.Context, tx *safe.Transaction) {
-	if s.execute == nil || tx.IsExecuted || tx.ConfirmationsRequired < 1 ||
+	if s.requestExecution == nil || tx.IsExecuted || tx.ConfirmationsRequired < 1 ||
 		len(tx.Confirmations) < tx.ConfirmationsRequired {
 		return
 	}
-	tx.Executing = s.execute(ctx, tx.Safe, tx.SafeTxHash)
+	tx.ExecutionState = s.requestExecution(ctx, tx.Safe, tx.SafeTxHash)
+	tx.Executing = tx.ExecutionState == safe.ExecutionQueued || tx.ExecutionState == safe.ExecutionSubmitted
 }
 
-func (s *safeService) markExecuting(ctx context.Context, txs []safe.Transaction) {
-	if s.executing == nil || len(txs) == 0 {
+func (s *safeService) markExecution(ctx context.Context, txs []safe.Transaction, currentNonce string) {
+	if s.executionStates == nil || len(txs) == 0 {
 		return
 	}
 	hashes := make([]string, len(txs))
 	for i, tx := range txs {
 		hashes[i] = strings.ToLower(tx.SafeTxHash)
 	}
-	queued := s.executing(ctx, hashes)
+	states := s.executionStates(ctx, hashes)
+	chainNonce, chainNonceOK := new(big.Int).SetString(currentNonce, 10)
 	for i := range txs {
-		txs[i].Executing = queued[hashes[i]]
+		if txs[i].IsExecuted || txs[i].ConfirmationsRequired < 1 || len(txs[i].Confirmations) < txs[i].ConfirmationsRequired {
+			continue
+		}
+		state, ok := states[hashes[i]]
+		if !ok {
+			continue
+		}
+		if nonce, ok := new(big.Int).SetString(txs[i].Nonce, 10); ok && chainNonceOK && nonce.Cmp(chainNonce) > 0 {
+			state = safe.ExecutionWaiting
+		}
+		txs[i].ExecutionState = state
+		txs[i].Executing = state == safe.ExecutionQueued || state == safe.ExecutionSubmitted
 	}
 }
 
@@ -325,14 +339,7 @@ func (s *safeService) pending(ctx context.Context, caller, safeAddress string) (
 			results = append(results, tx)
 		}
 	}
-	s.markExecuting(ctx, results)
-	// A transaction can reach its threshold while execution is off, or before
-	// clc-core could queue it. Listing queues it; the job coalesces per hash.
-	for i := range results {
-		if !results[i].Executing {
-			s.queueExecution(ctx, &results[i])
-		}
-	}
+	s.markExecution(ctx, results, nonce)
 	return results, nil
 }
 
@@ -350,9 +357,64 @@ func (s *safeService) transaction(ctx context.Context, caller, safeTxHash string
 	if err := s.requireSigner(ctx, caller, common.HexToAddress(tx.Safe)); err != nil {
 		return nil, err
 	}
+	nonce, err := s.sts.Nonce(ctx, tx.Safe)
+	if err != nil {
+		return nil, upstreamError(err)
+	}
 	single := []safe.Transaction{*tx}
-	s.markExecuting(ctx, single)
+	s.markExecution(ctx, single, nonce)
 	return &single[0], nil
+}
+
+func (s *safeService) executeTransaction(ctx context.Context, caller, safeTxHash string) (*safe.Transaction, error) {
+	if s.requestExecution == nil {
+		return nil, &proxyError{http.StatusServiceUnavailable, apiresp.ErrCodeInternalServerError, "sponsored Safe execution is unavailable"}
+	}
+	if !safeTxHashPattern.MatchString(safeTxHash) {
+		return nil, badRequest("invalid safeTxHash")
+	}
+	tx, err := s.sts.Transaction(ctx, safeTxHash)
+	if err != nil {
+		return nil, upstreamError(err)
+	}
+	if !common.IsHexAddress(tx.Safe) {
+		return nil, upstreamError(errors.New("malformed upstream transaction"))
+	}
+	safeAddress := common.HexToAddress(tx.Safe)
+	if err := s.requireSigner(ctx, caller, safeAddress); err != nil {
+		return nil, err
+	}
+	if _, err := s.verifyTransaction(ctx, safeAddress, safeTxHash, tx.TxFields); err != nil {
+		return nil, err
+	}
+	if tx.IsExecuted {
+		return tx, nil
+	}
+	if tx.ConfirmationsRequired < 1 || len(tx.Confirmations) < tx.ConfirmationsRequired {
+		return nil, &proxyError{http.StatusConflict, apiresp.ErrCodeConflict, "Safe transaction still needs confirmations"}
+	}
+	chainNonceRaw, err := s.sts.Nonce(ctx, tx.Safe)
+	if err != nil {
+		return nil, upstreamError(err)
+	}
+	chainNonce, chainOK := new(big.Int).SetString(chainNonceRaw, 10)
+	txNonce, txOK := new(big.Int).SetString(tx.Nonce, 10)
+	if !chainOK || !txOK {
+		return nil, upstreamError(errors.New("malformed Safe nonce"))
+	}
+	switch txNonce.Cmp(chainNonce) {
+	case 1:
+		tx.ExecutionState = safe.ExecutionWaiting
+		return tx, nil
+	case -1:
+		return nil, &proxyError{http.StatusConflict, apiresp.ErrCodeConflict, "Safe transaction nonce has already passed"}
+	}
+	tx.ExecutionState = s.requestExecution(ctx, tx.Safe, tx.SafeTxHash)
+	tx.Executing = tx.ExecutionState == safe.ExecutionQueued || tx.ExecutionState == safe.ExecutionSubmitted
+	if tx.ExecutionState == safe.ExecutionFailed {
+		return nil, &proxyError{http.StatusServiceUnavailable, apiresp.ErrCodeInternalServerError, "could not queue Safe execution"}
+	}
+	return tx, nil
 }
 
 func (s storeSafeSigners) Signers(ctx context.Context, safeAddress common.Address) ([]string, bool, error) {
@@ -572,4 +634,13 @@ func (a *API) safeTransactionHandler(c *echo.Context) error {
 		return a.writeProxyError(c, err)
 	}
 	return a.writeProxyResult(c, "Safe transaction", tx)
+}
+
+func (a *API) safeExecuteHandler(c *echo.Context) error {
+	_, caller, _ := getUserClaims(c)
+	tx, err := a.safeProxy.executeTransaction(c.Request().Context(), caller, c.Param("safeTxHash"))
+	if err != nil {
+		return a.writeProxyError(c, err)
+	}
+	return a.writeProxyResult(c, "Safe transaction execution requested", tx)
 }
