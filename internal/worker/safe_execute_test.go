@@ -66,10 +66,10 @@ func TestSafeExecuteWorkerOutcomes(t *testing.T) {
 				require.Empty(t, sent)
 			},
 		},
-		"signatures the backend cannot use stay with the Safe app": {
+		"a temporarily incomplete STS confirmation set is retried": {
 			prepare: &fakePreparer{err: fmt.Errorf("%w: 1 of 2", safe.ErrNotReady)},
 			check: func(t *testing.T, err error, sent []string) {
-				require.NoError(t, err)
+				require.ErrorIs(t, err, safe.ErrNotReady)
 				require.Empty(t, sent)
 			},
 		},
@@ -126,6 +126,14 @@ func TestSafeExecuteWorkerOutcomes(t *testing.T) {
 func TestSafeExecutionTrackingIDIsStablePerHash(t *testing.T) {
 	require.Equal(t, safeExecutionTrackingID(executeHash), safeExecutionTrackingID("0xABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB"))
 	require.NotEqual(t, safeExecutionTrackingID(executeHash), safeExecutionTrackingID("0x"+executeHash[4:]+"cd"))
+}
+
+func TestSafeExecutionUniquenessKeepsFinalJobsForExplicitRetry(t *testing.T) {
+	states := safeExecuteInsertOpts().UniqueOpts.ByState
+	require.Contains(t, states, rivertype.JobStateCompleted)
+	require.Contains(t, states, rivertype.JobStateCancelled)
+	require.Contains(t, states, rivertype.JobStateDiscarded)
+	require.Equal(t, 6, safeExecuteInsertOpts().MaxAttempts)
 }
 
 // Seven passkey confirmations on a Gnosis-fork Safe 1.5.0 estimated 3,276,905

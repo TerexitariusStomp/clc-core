@@ -8,8 +8,17 @@ import (
 	"github.com/cosmo-local-credit/clc-core/internal/safe"
 	"github.com/cosmo-local-credit/clc-core/pkg/event"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/riverqueue/river/rivertype"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSafeApprovalSyncUniquenessExpiresAfterCompletion(t *testing.T) {
+	states := safeApprovalSyncInsertOpts().UniqueOpts.ByState
+	require.Contains(t, states, rivertype.JobStateRunning)
+	require.Contains(t, states, rivertype.JobStateRetryable)
+	require.NotContains(t, states, rivertype.JobStateCompleted,
+		"a completed sync must not suppress the next 30-second reconciliation")
+}
 
 func TestSafeApprovalStage(t *testing.T) {
 	tests := []struct {

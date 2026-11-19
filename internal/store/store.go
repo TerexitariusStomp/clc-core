@@ -91,7 +91,7 @@ type (
 		RecordSafeApprovalMilestone(context.Context, pgx.Tx, int64, string, string, string, time.Time) (bool, error)
 		CatalogHasOwner(context.Context, pgx.Tx, int64, string) (bool, error)
 		SafeManagesAsset(context.Context, pgx.Tx, int64, string, string) (bool, error)
-		SafeExecutionsQueued(context.Context, pgx.Tx, []string) (map[string]bool, error)
+		SafeExecutionProgresses(context.Context, pgx.Tx, []string, []string) (map[string]SafeExecutionProgress, error)
 		SetPoolTokenMembership(context.Context, pgx.Tx, string, string, bool, router.Position) ([]router.EdgeKey, error)
 		PoolTokenMembershipStates(context.Context, pgx.Tx, string, string) (map[router.EdgeKey]bool, error)
 		PoolVoucherAdmission(context.Context, pgx.Tx, router.EdgeKey) (PoolVoucherAdmission, error)

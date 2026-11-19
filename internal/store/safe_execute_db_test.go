@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -24,7 +25,7 @@ type (
 
 func (safeExecuteJob) Kind() string { return "SAFE_EXECUTE" }
 
-func TestSafeExecutionsQueuedFollowsTheJobStateDB(t *testing.T) {
+func TestSafeExecutionProgressesDistinguishActiveAndFinalJobs(t *testing.T) {
 	pg, tx, cleanup := newMarketTestPg(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -40,17 +41,24 @@ func TestSafeExecutionsQueuedFollowsTheJobStateDB(t *testing.T) {
 	queue, err := river.NewClient(driver, &river.Config{})
 	require.NoError(t, err)
 
-	queued, cancelled, unknown := randomHash(t), randomHash(t), randomHash(t)
-	for _, hash := range []string{queued, cancelled} {
+	queued, cancelled, completed, unknown := randomHash(t), randomHash(t), randomHash(t), randomHash(t)
+	for _, hash := range []string{queued, cancelled, completed} {
 		_, err := queue.InsertTx(ctx, tx, safeExecuteJob{SafeTxHash: hash, Safe: "0x1111111111111111111111111111111111111111"}, nil)
 		require.NoError(t, err)
 	}
 	_, err = tx.Exec(ctx, `UPDATE river_job SET state='cancelled', finalized_at=now() WHERE kind='SAFE_EXECUTE' AND args->>'safeTxHash'=$1`, cancelled)
 	require.NoError(t, err)
-
-	got, err := pg.SafeExecutionsQueued(ctx, tx, []string{queued, cancelled, unknown})
+	_, err = tx.Exec(ctx, `UPDATE river_job SET state='completed', finalized_at=now() WHERE kind='SAFE_EXECUTE' AND args->>'safeTxHash'=$1`, completed)
 	require.NoError(t, err)
-	require.Equal(t, map[string]bool{queued: true}, got, "a cancelled execution leaves the Safe app as the way forward")
+
+	hashes := []string{queued, cancelled, completed, unknown}
+	tracking := []string{uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()}
+	got, err := pg.SafeExecutionProgresses(ctx, tx, hashes, tracking)
+	require.NoError(t, err)
+	require.Equal(t, "available", got[queued].JobState)
+	require.Equal(t, "cancelled", got[cancelled].JobState)
+	require.Equal(t, "completed", got[completed].JobState)
+	require.Zero(t, got[unknown].JobID)
 }
 
 func randomHash(t *testing.T) string {

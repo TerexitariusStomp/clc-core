@@ -8,10 +8,34 @@ import (
 	"testing"
 
 	"github.com/cosmo-local-credit/clc-core/internal/safe"
+	"github.com/cosmo-local-credit/clc-core/internal/store"
 	apiresp "github.com/cosmo-local-credit/clc-core/pkg/api"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/labstack/echo/v5"
 )
+
+func TestSafeExecutionStatePrecedence(t *testing.T) {
+	tests := []struct {
+		name     string
+		progress store.SafeExecutionProgress
+		want     safe.ExecutionState
+	}{
+		{name: "never attempted", want: safe.ExecutionReady},
+		{name: "queued", progress: store.SafeExecutionProgress{JobState: "available"}, want: safe.ExecutionQueued},
+		{name: "running", progress: store.SafeExecutionProgress{JobState: "running"}, want: safe.ExecutionQueued},
+		{name: "submitted", progress: store.SafeExecutionProgress{JobState: "completed", OTXActive: true}, want: safe.ExecutionSubmitted},
+		{name: "sent successfully while STS catches up", progress: store.SafeExecutionProgress{JobState: "completed", OTXSucceeded: true}, want: safe.ExecutionSubmitted},
+		{name: "completed without submission", progress: store.SafeExecutionProgress{JobState: "completed"}, want: safe.ExecutionFailed},
+		{name: "terminal OTX", progress: store.SafeExecutionProgress{OTXFailed: true}, want: safe.ExecutionFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := safeExecutionState(test.progress); got != test.want {
+				t.Fatalf("got %q, want %q", got, test.want)
+			}
+		})
+	}
+}
 
 type (
 	noSafes struct{}

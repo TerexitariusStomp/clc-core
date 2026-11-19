@@ -11,6 +11,11 @@ import (
 )
 
 type (
+	// ExecutionState describes clc-core's sponsored execution lifecycle. It is
+	// intentionally separate from Safe's confirmation state so clients can
+	// offer a deterministic retry without guessing from a stale spinner.
+	ExecutionState string
+
 	// TxFields is a Safe transaction as clients and the Transaction Service
 	// carry it: every number a decimal string, data 0x-hex.
 	TxFields struct {
@@ -44,8 +49,17 @@ type (
 		IsSuccessful          *bool          `json:"isSuccessful"`
 		TransactionHash       *string        `json:"transactionHash"`
 		// Executing: clc-core has queued or sent the execution itself.
-		Executing bool `json:"executing"`
+		Executing      bool           `json:"executing"`
+		ExecutionState ExecutionState `json:"executionState,omitempty"`
 	}
+)
+
+const (
+	ExecutionReady     ExecutionState = "ready"
+	ExecutionQueued    ExecutionState = "queued"
+	ExecutionSubmitted ExecutionState = "submitted"
+	ExecutionWaiting   ExecutionState = "waiting"
+	ExecutionFailed    ExecutionState = "failed"
 )
 
 var (

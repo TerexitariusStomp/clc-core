@@ -161,8 +161,8 @@ func New(o APIOpts) *API {
 			a.safeProxy.contracts = safeReader.ContractVerifierLatest
 		}
 		if o.SafeAutoExecute {
-			a.safeProxy.execute = a.queueSafeExecution
-			a.safeProxy.executing = a.safeExecutionsQueued
+			a.safeProxy.requestExecution = a.requestSafeExecution
+			a.safeProxy.executionStates = a.safeExecutionStates
 		}
 	}
 	a.marketLimiter.startSweeper()
@@ -428,6 +428,7 @@ func New(o APIOpts) *API {
 		safeGroup.POST("/proposals", a.safeProposalHandler)
 		safeGroup.POST("/confirmations", a.safeConfirmationHandler)
 		safeGroup.GET("/transactions/:safeTxHash", a.safeTransactionHandler)
+		safeGroup.POST("/transactions/:safeTxHash/execute", a.safeExecuteHandler)
 		safeGroup.GET("/:address/pending", a.safePendingHandler)
 	}
 
