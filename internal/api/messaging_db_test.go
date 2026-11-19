@@ -85,12 +85,71 @@ func (f *msgFixture) cleanup() {
 		`DELETE FROM river_job WHERE kind = 'MESSAGING_EVENT' AND (args->'actor'->>'userId')::INT = ANY($1)`,
 		`DELETE FROM abuse_reports WHERE reporter_id = ANY($1) OR reported_user_id = ANY($1) OR resolved_by = ANY($1)`,
 		`DELETE FROM conversations WHERE user_a_id = ANY($1) OR user_b_id = ANY($1)`,
+		`DELETE FROM pools WHERE name = '` + messagingTestMarker + `' AND $1::BIGINT[] IS NOT NULL`,
+		`DELETE FROM vouchers WHERE name = '` + messagingTestMarker + `' AND $1::BIGINT[] IS NOT NULL`,
 		`DELETE FROM users WHERE id = ANY($1)`,
 	} {
 		if _, err := pool.Exec(ctx, stmt, f.users); err != nil {
 			f.t.Errorf("messaging cleanup %q: %v", stmt, err)
 		}
 	}
+}
+
+func TestMessagingResourceContextDB(t *testing.T) {
+	f := newMessagingFixture(t)
+	alice, bob, carol := f.approved(), f.approved(), f.approved()
+	poolAddress, voucherAddress := randomAddress(t), randomAddress(t)
+	_, err := f.a.store.Pool().Exec(t.Context(), `
+		INSERT INTO pools(chain_id,address,name,active,owner_address)
+		VALUES($1,$2,$3,true,$4)`,
+		f.a.chainID, poolAddress, messagingTestMarker, bob.Address)
+	require.NoError(t, err)
+	_, err = f.a.store.Pool().Exec(t.Context(), `
+		INSERT INTO vouchers(chain_id,address,name,symbol,active,owner_address)
+		VALUES($1,$2,$3,'MSGCTX',true,$4)`,
+		f.a.chainID, voucherAddress, messagingTestMarker, alice.Address)
+	require.NoError(t, err)
+
+	context := map[string]any{
+		"kind": "pool", "resourceId": strings.ToLower(poolAddress),
+		"proposedVoucherAddress": strings.ToLower(voucherAddress),
+	}
+	res := f.do(alice, http.MethodPost, "/api/v2/conversations", map[string]any{
+		"recipientAddress": bob.Address, "context": context,
+	})
+	require.Equal(t, http.StatusCreated, res.Code, res.Raw)
+	var conversation messagingConversation
+	res.decode(t, &conversation)
+	require.NotNil(t, conversation.LastMessage)
+	require.Nil(t, conversation.LastMessage.Body)
+	require.Equal(t, "pool", conversation.LastMessage.Context.Kind)
+	require.Equal(t, poolAddress, conversation.LastMessage.Context.ResourceID)
+	require.Equal(t, messagingTestMarker, conversation.LastMessage.Context.ResourceName)
+	require.NotNil(t, conversation.LastMessage.Context.ProposedVoucher)
+	require.Equal(t, voucherAddress, conversation.LastMessage.Context.ProposedVoucher.Address)
+
+	require.Equal(t, http.StatusOK, f.setStatus(bob, conversation.ID, "accepted").Code)
+	res = f.do(alice, http.MethodPost,
+		fmt.Sprintf("/api/v2/conversations/%d/messages", conversation.ID),
+		map[string]any{"clientId": uuid.NewString(), "context": context})
+	require.Equal(t, http.StatusCreated, res.Code, res.Raw)
+	var sent messagingMessage
+	res.decode(t, &sent)
+	require.Nil(t, sent.Body)
+	require.Equal(t, poolAddress, sent.Context.ResourceID)
+
+	res = f.do(alice, http.MethodPost, "/api/v2/conversations", map[string]any{
+		"recipientAddress": carol.Address, "context": context,
+	})
+	require.Equal(t, http.StatusNotFound, res.Code, res.Raw)
+
+	res = f.do(alice, http.MethodPost,
+		fmt.Sprintf("/api/v2/conversations/%d/messages", conversation.ID),
+		map[string]any{"clientId": uuid.NewString(), "context": map[string]any{
+			"kind": "voucher", "resourceId": voucherAddress,
+			"proposedVoucherAddress": voucherAddress,
+		}})
+	require.Equal(t, http.StatusBadRequest, res.Code, res.Raw)
 }
 
 func randomAddress(t *testing.T) string {
@@ -407,6 +466,69 @@ func TestMessagingUsesCurrentPeerUsernameDB(t *testing.T) {
 	require.Equal(t, "renamed-peer", *detail.Peer.Username, "conversation identity must not be a stale snapshot")
 }
 
+func TestMessagingFindsDirectConversationByPeerDB(t *testing.T) {
+	f := newMessagingFixture(t)
+	alice, bob, carol := f.approved(), f.approved(), f.approved()
+	admin := f.user("ADMIN", "APPROVED")
+	accepted := f.connect(alice, bob)
+	latest := f.sent(bob, accepted, "latest message from Bob")
+	newer := f.request(alice, carol)
+
+	type page struct {
+		Items      []messagingConversation `json:"items"`
+		NextCursor *string                 `json:"nextCursor"`
+	}
+	const listPath = "/api/v2/conversations?kind=direct"
+	read := func(user msgUser, path string) page {
+		t.Helper()
+		res := f.do(user, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, res.Code, res.Raw)
+		var result page
+		res.decode(t, &result)
+		return result
+	}
+	one := read(alice, listPath+"&limit=1")
+	require.Len(t, one.Items, 1)
+	require.Equal(t, newer.ID, one.Items[0].ID)
+	require.NotNil(t, one.NextCursor)
+
+	withBob := read(alice, listPath+"&peerAddress="+strings.ToLower(bob.Address))
+	require.Nil(t, withBob.NextCursor)
+	require.Len(t, withBob.Items, 1)
+	require.Equal(t, accepted, withBob.Items[0].ID)
+	require.Equal(t, "accepted", withBob.Items[0].Status)
+	require.Equal(t, bob.Address, withBob.Items[0].Peer.Address)
+	require.Equal(t, latest.ID, withBob.Items[0].LastMessage.ID)
+	require.Equal(t, "peer", withBob.Items[0].LastMessage.Sender)
+
+	withAlice := read(bob, "/api/v2/conversations?peerAddress="+alice.Address)
+	require.Len(t, withAlice.Items, 1)
+	require.Equal(t, accepted, withAlice.Items[0].ID)
+	require.Equal(t, "self", withAlice.Items[0].LastMessage.Sender)
+
+	withCarol := read(alice, listPath+"&peerAddress="+carol.Address)
+	require.Len(t, withCarol.Items, 1)
+	require.Equal(t, newer.ID, withCarol.Items[0].ID)
+	require.Equal(t, "pending", withCarol.Items[0].Status)
+
+	missing := page{Items: []messagingConversation{}}
+	require.Equal(t, missing, read(alice, listPath+"&peerAddress="+randomAddress(t)))
+	require.Equal(t, missing, read(alice, listPath+"&peerAddress="+alice.Address))
+	require.Equal(t, missing, read(admin, listPath+"&peerAddress="+bob.Address))
+	require.Equal(t, missing, read(carol, listPath+"&peerAddress="+bob.Address))
+
+	for _, path := range []string{
+		listPath + "&peerAddress=",
+		listPath + "&peerAddress=bad",
+		listPath + "&peerAddress=" + bob.Address + "&peerAddress=" + carol.Address,
+		listPath + "&peerAddress=" + bob.Address + "&cursor=" + *one.NextCursor,
+		"/api/v2/conversations?kind=helpdesk&peerAddress=" + bob.Address,
+	} {
+		res := f.do(alice, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusBadRequest, res.Code, res.Raw)
+	}
+}
+
 func TestMessagingAuthorizationDB(t *testing.T) {
 	f := newMessagingFixture(t)
 	alice, bob, mallory := f.approved(), f.approved(), f.approved()
@@ -624,6 +746,22 @@ func TestMessagingBlocksDB(t *testing.T) {
 	}
 	require.NotContains(t, listIDs(), erinConv.ID)
 	require.Contains(t, listIDs(), conv, "an accepted conversation stays listed")
+	lookup := func(caller, peer msgUser) []messagingConversation {
+		res := f.do(caller, http.MethodGet, "/api/v2/conversations?kind=direct&peerAddress="+peer.Address, nil)
+		require.Equal(t, http.StatusOK, res.Code, res.Raw)
+		var page struct {
+			Items []messagingConversation `json:"items"`
+		}
+		res.decode(t, &page)
+		return page.Items
+	}
+	require.Empty(t, lookup(bob, erin), "an exact lookup cannot restore a hidden pending request")
+	bobView := lookup(bob, alice)
+	require.Len(t, bobView, 1)
+	require.True(t, bobView[0].Blocked)
+	aliceView := lookup(alice, bob)
+	require.Len(t, aliceView, 1)
+	require.False(t, aliceView[0].Blocked, "a peer cannot see that the caller blocked them")
 
 	res = f.do(bob, http.MethodGet, "/api/v2/blocks", nil)
 	require.Equal(t, http.StatusOK, res.Code)
@@ -1075,8 +1213,10 @@ func TestMessagingPagingAndValidationDB(t *testing.T) {
 
 func TestMessagingRequiresAUserSessionDB(t *testing.T) {
 	f := newMessagingFixture(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/v2/conversations", nil)
-	res := httptest.NewRecorder()
-	f.a.router.ServeHTTP(res, req)
-	require.Equal(t, http.StatusUnauthorized, res.Code)
+	for _, path := range []string{"/api/v2/conversations", "/api/v2/conversations?peerAddress=" + randomAddress(t)} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		res := httptest.NewRecorder()
+		f.a.router.ServeHTTP(res, req)
+		require.Equal(t, http.StatusUnauthorized, res.Code)
+	}
 }

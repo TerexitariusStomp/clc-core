@@ -14,6 +14,7 @@ import (
 	"github.com/cosmo-local-credit/clc-core/internal/store"
 	"github.com/cosmo-local-credit/clc-core/internal/telemetry"
 	"github.com/cosmo-local-credit/clc-core/internal/util"
+	"github.com/cosmo-local-credit/clc-core/internal/worker"
 	"github.com/go-playground/validator/v10"
 	"github.com/grassrootseconomics/ethutils"
 	"github.com/jackc/pgx/v5"
@@ -150,6 +151,11 @@ func New(o APIOpts) *API {
 			policy:  a.safePolicy,
 			sts:     safe.NewSTS(o.SafeSTSURL, o.SafeSTSKey),
 			signers: storeSafeSigners{a: a},
+		}
+		a.safeProxy.syncApproval = func(ctx context.Context, safeAddress, safeTxHash string) {
+			if err := worker.EnqueueSafeApprovalSync(ctx, a.queueClient, safeAddress, safeTxHash); err != nil {
+				a.logg.Error("could not queue Safe approval notification sync", "safe", safeAddress, "safe_tx_hash", safeTxHash, "err", err)
+			}
 		}
 		if safeReader != nil {
 			a.safeProxy.contracts = safeReader.ContractVerifierLatest

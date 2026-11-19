@@ -103,6 +103,8 @@ type (
 		DeleteVoucherTags            string `query:"delete-voucher-tags"`
 		InsertVoucherTag             string `query:"insert-voucher-tag"`
 		SetPoolTokenMembership       string `query:"set-pool-token-membership"`
+		PoolTokenMembershipStates    string `query:"pool-token-membership-states"`
+		PoolVoucherAdmission         string `query:"pool-voucher-admission"`
 		SetPoolTokenLimit            string `query:"set-pool-token-limit"`
 		SetPoolTokenOracle           string `query:"set-pool-token-oracle"`
 		ClearPoolTokenOracle         string `query:"clear-pool-token-oracle"`
@@ -322,7 +324,10 @@ type (
 		// Messaging (migration 074).
 		MessagingApprovedUserByAddress         string `query:"messaging-approved-user-by-address"`
 		MessagingUserByAddress                 string `query:"messaging-user-by-address"`
+		MessagingResourceByID                  string `query:"messaging-resource-by-id"`
+		MessagingVoucherByAddress              string `query:"messaging-voucher-by-address"`
 		MessagingGetConversation               string `query:"messaging-get-conversation"`
+		MessagingDirectConversationIDByPeer    string `query:"messaging-direct-conversation-id-by-peer"`
 		MessagingListConversations             string `query:"messaging-list-conversations"`
 		MessagingUnreadCounts                  string `query:"messaging-unread-counts"`
 		MessagingMemberConversation            string `query:"messaging-member-conversation"`

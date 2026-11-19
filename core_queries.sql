@@ -1720,6 +1720,27 @@ WHERE (EXCLUDED.allowed_block, EXCLUDED.allowed_log_index)
     > (COALESCE(pool_tokens.allowed_block, -1), COALESCE(pool_tokens.allowed_log_index, -1))
 RETURNING pool_id, voucher_id;
 
+-- Read the authoritative state before a registry write so a successful
+-- false/missing -> true transition can emit one admission notification while
+-- a newer true -> true event merely advances projection ordering.
+--name: pool-token-membership-states
+SELECT p.id AS pool_id, v.id AS voucher_id, COALESCE(pt.is_allowed, FALSE)
+FROM pools p
+JOIN vouchers v ON v.chain_id = p.chain_id AND lower(v.address) = lower($2::TEXT)
+LEFT JOIN pool_tokens pt ON pt.pool_id = p.id AND pt.voucher_id = v.id
+WHERE lower(p.token_registry_address) = lower($1::TEXT)
+;
+
+--name: pool-voucher-admission
+SELECT p.address AS pool_address,
+    COALESCE(NULLIF(p.display_name, ''), p.name, p.symbol, p.address) AS pool_name,
+    p.owner_address AS pool_owner,
+    v.address AS voucher_address,
+    COALESCE(NULLIF(v.display_name, ''), v.name, v.symbol, v.address) AS voucher_name,
+    v.owner_address AS voucher_owner
+FROM pools p JOIN vouchers v ON v.id = $2::BIGINT
+WHERE p.id = $1::BIGINT AND p.owner_address IS NOT NULL AND v.owner_address IS NOT NULL;
+
 --name: set-pool-token-limit
 INSERT INTO pool_tokens (pool_id, voucher_id, is_allowed, token_limit, limit_block, limit_log_index, synced_at)
 SELECT p.id, v.id, FALSE, $3::NUMERIC, $4::BIGINT, $5::INT, CURRENT_TIMESTAMP
@@ -4606,7 +4627,8 @@ SELECT c.id, c.kind, c.status, c.actor_id, c.intro, c.last_message_at, c.created
           AND m.id > COALESCE(r.last_read_message_id, 0))::INT AS unread_count,
     lm.id AS last_message_id, lm.client_id AS last_message_client_id,
     lm.sender_user_id AS last_message_sender_id, lm.body AS last_message_body,
-    lm.image_urls AS last_message_image_urls, lm.created_at AS last_message_created_at
+    lm.image_urls AS last_message_image_urls, lm.resource_context AS last_message_context,
+    lm.created_at AS last_message_created_at
 FROM (
     SELECT c.*, CASE WHEN c.kind = 'direct'
         THEN CASE WHEN c.user_a_id = $1::INT THEN c.user_b_id ELSE c.user_a_id END END AS peer_id
@@ -4617,9 +4639,22 @@ FROM (
 LEFT JOIN users peer ON peer.id = c.peer_id
 LEFT JOIN conversation_reads r ON r.conversation_id = c.id AND r.user_id = $1::INT
 LEFT JOIN LATERAL (
-    SELECT m.id, m.client_id, m.sender_user_id, m.body, m.image_urls, m.created_at
+    SELECT m.id, m.client_id, m.sender_user_id, m.body, m.image_urls, m.resource_context, m.created_at
     FROM messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1
 ) lm ON true;
+
+-- Find one direct conversation using the wallet and unique pair indexes.
+-- As in the ordinary list, a pending request from someone the caller blocked is left out.
+--name: messaging-direct-conversation-id-by-peer
+SELECT c.id
+FROM users peer
+JOIN conversations c ON c.kind = 'direct'
+    AND c.user_a_id = LEAST($1::INT, peer.id)
+    AND c.user_b_id = GREATEST($1::INT, peer.id)
+WHERE lower(peer.blockchain_address) = lower($2)
+  AND peer.id <> $1::INT
+  AND NOT (c.status = 'pending' AND c.actor_id <> $1::INT
+      AND EXISTS (SELECT 1 FROM user_blocks b WHERE b.blocker_id = $1::INT AND b.blocked_id = c.actor_id));
 
 -- The caller's conversations, newest activity first. Activity is the later of
 -- the last message and the last status change (GREATEST skips a NULL), so a
@@ -4651,7 +4686,8 @@ SELECT c.id, c.kind, c.status, c.actor_id, c.intro, c.last_message_at, c.created
           AND m.id > COALESCE(r.last_read_message_id, 0))::INT AS unread_count,
     lm.id AS last_message_id, lm.client_id AS last_message_client_id,
     lm.sender_user_id AS last_message_sender_id, lm.body AS last_message_body,
-    lm.image_urls AS last_message_image_urls, lm.created_at AS last_message_created_at
+    lm.image_urls AS last_message_image_urls, lm.resource_context AS last_message_context,
+    lm.created_at AS last_message_created_at
 FROM (
     -- Page first, then join: peer, marker and last message for at most $5 rows.
     SELECT * FROM mine c
@@ -4666,7 +4702,7 @@ FROM (
 LEFT JOIN users peer ON peer.id = c.peer_id
 LEFT JOIN conversation_reads r ON r.conversation_id = c.id AND r.user_id = $1::INT
 LEFT JOIN LATERAL (
-    SELECT m.id, m.client_id, m.sender_user_id, m.body, m.image_urls, m.created_at
+    SELECT m.id, m.client_id, m.sender_user_id, m.body, m.image_urls, m.resource_context, m.created_at
     FROM messages m WHERE m.conversation_id = c.id ORDER BY m.id DESC LIMIT 1
 ) lm ON true
 ORDER BY GREATEST(c.last_message_at, c.updated_at) DESC, c.id DESC;
@@ -4813,7 +4849,7 @@ SELECT EXISTS (SELECT 1 FROM user_blocks WHERE blocker_id = $1::INT AND blocked_
 
 --name: messaging-message-by-client-id
 SELECT m.id, m.conversation_id, m.sender_user_id, u.blockchain_address AS sender_address,
-    m.client_id, m.body, m.image_urls, m.created_at
+    m.client_id, m.body, m.image_urls, m.resource_context, m.created_at
 FROM messages m
 JOIN users u ON u.id = m.sender_user_id
 WHERE m.sender_user_id = $1::INT AND m.client_id = $2::UUID;
@@ -4822,11 +4858,11 @@ WHERE m.sender_user_id = $1::INT AND m.client_id = $2::UUID;
 -- within a conversation, and so does created_at: it is the time the lock was
 -- held, not the transaction's start, and never earlier than the message before.
 --name: messaging-insert-message
-INSERT INTO messages (conversation_id, sender_user_id, client_id, body, image_urls, created_at)
-VALUES ($1::BIGINT, $2::INT, $3::UUID, $4, $5::TEXT[], GREATEST(clock_timestamp(),
+INSERT INTO messages (conversation_id, sender_user_id, client_id, body, image_urls, resource_context, created_at)
+VALUES ($1::BIGINT, $2::INT, $3::UUID, $4, $5::TEXT[], $6::JSONB, GREATEST(clock_timestamp(),
     (SELECT c.last_message_at FROM conversations c WHERE c.id = $1::BIGINT)))
 ON CONFLICT (sender_user_id, client_id) DO NOTHING
-RETURNING id, conversation_id, sender_user_id, client_id, body, image_urls, created_at;
+RETURNING id, conversation_id, sender_user_id, client_id, body, image_urls, resource_context, created_at;
 
 -- Never moves backwards.
 --name: messaging-touch-conversation
@@ -4844,7 +4880,7 @@ RETURNING id;
 -- Pages are per conversation: the newest $3 below $2, or the oldest $3 above it.
 --name: messaging-messages-before
 SELECT m.id, m.conversation_id, m.sender_user_id, u.blockchain_address AS sender_address,
-    m.client_id, m.body, m.image_urls, m.created_at
+    m.client_id, m.body, m.image_urls, m.resource_context, m.created_at
 FROM messages m
 JOIN users u ON u.id = m.sender_user_id
 WHERE m.conversation_id = $1::BIGINT AND m.id < $2::BIGINT
@@ -4853,12 +4889,49 @@ LIMIT $3::INT;
 
 --name: messaging-messages-after
 SELECT m.id, m.conversation_id, m.sender_user_id, u.blockchain_address AS sender_address,
-    m.client_id, m.body, m.image_urls, m.created_at
+    m.client_id, m.body, m.image_urls, m.resource_context, m.created_at
 FROM messages m
 JOIN users u ON u.id = m.sender_user_id
 WHERE m.conversation_id = $1::BIGINT AND m.id > $2::BIGINT
 ORDER BY m.id ASC
 LIMIT $3::INT;
+
+-- A public resource that may be attached to a direct message. The result also
+-- carries its current owner so the API can prove the selected recipient is an
+-- EOA owner or projected Safe signer. $1 kind, $2 id/address, $3 chain.
+--name: messaging-resource-by-id
+SELECT * FROM (
+    SELECT 'pool'::TEXT AS kind, p.address AS resource_id,
+        COALESCE(NULLIF(p.display_name, ''), p.name, p.symbol, p.address) AS resource_name,
+        p.owner_address
+    FROM pools p
+    WHERE $1::TEXT = 'pool' AND p.chain_id = $3::BIGINT AND p.active
+      AND lower(p.address) = lower($2::TEXT)
+    UNION ALL
+    SELECT 'voucher'::TEXT, v.address,
+        COALESCE(NULLIF(v.display_name, ''), v.name, v.symbol, v.address), v.owner_address
+    FROM vouchers v
+    WHERE $1::TEXT = 'voucher' AND v.chain_id = $3::BIGINT AND v.active
+      AND lower(v.address) = lower($2::TEXT)
+    UNION ALL
+    SELECT 'want'::TEXT, w.id::TEXT, w.name, u.blockchain_address
+    FROM wants w JOIN users u ON u.id = w.owner_user_id
+    WHERE $1::TEXT = 'want' AND w.status = 'OPEN' AND w.id::TEXT = $2::TEXT
+      AND NOT user_retiring(w.owner_user_id)
+    UNION ALL
+    SELECT 'catalog'::TEXT, c.id::TEXT, c.name, u.blockchain_address
+    FROM catalogs c JOIN users u ON u.id = c.owner_user_id
+    WHERE $1::TEXT = 'catalog' AND c.id::TEXT = $2::TEXT
+      AND NOT user_retiring(c.owner_user_id)
+) resource
+WHERE owner_address IS NOT NULL
+LIMIT 1;
+
+--name: messaging-voucher-by-address
+SELECT v.address, COALESCE(NULLIF(v.display_name, ''), v.name, v.symbol, v.address) AS name,
+    COALESCE(v.symbol, '') AS symbol
+FROM vouchers v
+WHERE v.chain_id = $1::BIGINT AND v.active AND lower(v.address) = lower($2::TEXT);
 
 -- The read marker only moves forward, and only to a message of that
 -- conversation. Returns a row only when the marker moved; the caller tells a

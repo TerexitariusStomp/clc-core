@@ -52,8 +52,9 @@ type (
 		// execute queues clc-core's execution of a confirmed transaction and
 		// executing reports which are queued; both nil leaves execution to
 		// the Safe app.
-		execute   func(ctx context.Context, safe, safeTxHash string) bool
-		executing func(ctx context.Context, safeTxHashes []string) map[string]bool
+		execute      func(ctx context.Context, safe, safeTxHash string) bool
+		executing    func(ctx context.Context, safeTxHashes []string) map[string]bool
+		syncApproval func(ctx context.Context, safe, safeTxHash string)
 		// contracts verifies contract (v 0) signatures against a Safe at the
 		// latest block; nil rejects them.
 		contracts func(safe common.Address) safe.ContractVerifier
@@ -228,6 +229,9 @@ func (s *safeService) propose(ctx context.Context, caller string, req safePropos
 		return nil, upstreamError(err)
 	}
 	s.queueExecution(ctx, tx)
+	if s.syncApproval != nil {
+		s.syncApproval(ctx, tx.Safe, tx.SafeTxHash)
+	}
 	return tx, nil
 }
 
@@ -293,6 +297,9 @@ func (s *safeService) confirm(ctx context.Context, caller string, req safeConfir
 		return nil, upstreamError(err)
 	}
 	s.queueExecution(ctx, updated)
+	if s.syncApproval != nil {
+		s.syncApproval(ctx, updated.Safe, updated.SafeTxHash)
+	}
 	return updated, nil
 }
 

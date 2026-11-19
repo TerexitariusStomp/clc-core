@@ -45,6 +45,9 @@ type (
 		// Pub so wiring it does not also switch on the CUSTODIAL sends in the
 		// dispatch and receipt jobs, which cmd/core has never configured.
 		MessagingPublisher *pub.Pub
+		SafeSTSURL         string
+		SafeSTSKey         string
+		SafeMultiSend      []string
 	}
 
 	WorkerContainer struct {
@@ -61,13 +64,15 @@ type (
 		chainID             int64
 		safeExecutor        *safe.Executor
 		messagingPublisher  *pub.Pub
+		safeApprovalSTS     safeApprovalSTS
+		safeApprovalPolicy  *safe.Policy
 	}
 )
 
 func (h infoHandler) Enabled(_ context.Context, l slog.Level) bool { return l >= slog.LevelInfo }
 
 func New(o WorkerOpts) *WorkerContainer {
-	return &WorkerContainer{
+	wc := &WorkerContainer{
 		maxWorkers:          o.MaxWorkers,
 		gasOracle:           o.GasOracle,
 		store:               o.Store,
@@ -81,6 +86,19 @@ func New(o WorkerOpts) *WorkerContainer {
 		safeExecutor:        o.SafeExecutor,
 		messagingPublisher:  o.MessagingPublisher,
 	}
+	if o.SafeSTSURL != "" && len(o.SafeMultiSend) > 0 {
+		addresses := make([]common.Address, 0, len(o.SafeMultiSend))
+		for _, raw := range o.SafeMultiSend {
+			if common.IsHexAddress(raw) {
+				addresses = append(addresses, common.HexToAddress(raw))
+			}
+		}
+		if len(addresses) > 0 {
+			wc.safeApprovalSTS = safe.NewSTS(o.SafeSTSURL, o.SafeSTSKey)
+			wc.safeApprovalPolicy = safe.NewPolicy(workerSafeResolver{wc: wc}, addresses, safe.DefaultAllowedSignatures)
+		}
+	}
+	return wc
 }
 
 func (w *WorkerContainer) Bootstrap() error {
@@ -102,6 +120,20 @@ func (w *WorkerContainer) Bootstrap() error {
 		return err
 	}
 
+	periodicJobs := []*river.PeriodicJob{
+		river.NewPeriodicJob(
+			river.PeriodicInterval(reconcileInterval),
+			func() (river.JobArgs, *river.InsertOpts) { return NonceReconcilerArgs{}, nil },
+			&river.PeriodicJobOpts{RunOnStart: true},
+		),
+	}
+	if w.safeApprovalSTS != nil && w.safeApprovalPolicy != nil {
+		periodicJobs = append(periodicJobs, river.NewPeriodicJob(
+			river.PeriodicInterval(safeApprovalReconcileInterval),
+			func() (river.JobArgs, *river.InsertOpts) { return SafeApprovalReconcileArgs{}, nil },
+			&river.PeriodicJobOpts{RunOnStart: true},
+		))
+	}
 	w.queueClient, err = river.NewClient(riverPgxDriver, &river.Config{
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {
@@ -115,15 +147,7 @@ func (w *WorkerContainer) Bootstrap() error {
 		// dropped a transaction after accepting it, or a process that died
 		// between signing and publishing. Without it a stuck nonce is only
 		// noticed when someone reads the otx table.
-		PeriodicJobs: []*river.PeriodicJob{
-			river.NewPeriodicJob(
-				river.PeriodicInterval(reconcileInterval),
-				func() (river.JobArgs, *river.InsertOpts) {
-					return NonceReconcilerArgs{}, nil
-				},
-				&river.PeriodicJobOpts{RunOnStart: true},
-			),
-		},
+		PeriodicJobs: periodicJobs,
 	})
 	if err != nil {
 		return err
@@ -208,6 +232,15 @@ func setupWorkers(wc *WorkerContainer) (*river.Workers, error) {
 
 	if wc.safeExecutor != nil {
 		if err := river.AddWorkerSafely(workers, &SafeExecuteWorker{wc: wc, executor: wc.safeExecutor}); err != nil {
+			return nil, err
+		}
+	}
+
+	if wc.safeApprovalSTS != nil && wc.safeApprovalPolicy != nil {
+		if err := river.AddWorkerSafely(workers, &SafeApprovalSyncWorker{wc: wc, sts: wc.safeApprovalSTS, policy: wc.safeApprovalPolicy}); err != nil {
+			return nil, err
+		}
+		if err := river.AddWorkerSafely(workers, &SafeApprovalReconcileWorker{wc: wc}); err != nil {
 			return nil, err
 		}
 	}

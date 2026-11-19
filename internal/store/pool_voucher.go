@@ -11,6 +11,15 @@ import (
 )
 
 type (
+	PoolVoucherAdmission struct {
+		PoolAddress    string `db:"pool_address"`
+		PoolName       string `db:"pool_name"`
+		PoolOwner      string `db:"pool_owner"`
+		VoucherAddress string `db:"voucher_address"`
+		VoucherName    string `db:"voucher_name"`
+		VoucherOwner   string `db:"voucher_owner"`
+	}
+
 	PoolVoucher struct {
 		ID                  uint64    `db:"id"                     json:"id"`
 		ChainID             int64     `db:"chain_id"               json:"chainId"`
@@ -120,6 +129,30 @@ func (pg *Pg) SetPoolTokenMembership(
 ) ([]router.EdgeKey, error) {
 	return pg.projectEdges(ctx, tx, pg.queries.SetPoolTokenMembership,
 		registryAddress, tokenAddress, isAllowed, int64(pos.Block), int64(pos.LogIndex))
+}
+
+func (pg *Pg) PoolTokenMembershipStates(ctx context.Context, tx pgx.Tx, registryAddress, tokenAddress string) (map[router.EdgeKey]bool, error) {
+	rows, err := tx.Query(ctx, pg.queries.PoolTokenMembershipStates, registryAddress, tokenAddress)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := map[router.EdgeKey]bool{}
+	for rows.Next() {
+		var key router.EdgeKey
+		var allowed bool
+		if err := rows.Scan(&key.PoolID, &key.VoucherID, &allowed); err != nil {
+			return nil, err
+		}
+		states[key] = allowed
+	}
+	return states, rows.Err()
+}
+
+func (pg *Pg) PoolVoucherAdmission(ctx context.Context, tx pgx.Tx, key router.EdgeKey) (PoolVoucherAdmission, error) {
+	var admission PoolVoucherAdmission
+	err := pgxscan.Get(ctx, tx, &admission, pg.queries.PoolVoucherAdmission, key.PoolID, key.VoucherID)
+	return admission, err
 }
 
 // SetPoolTokenLimit records the limiter cap a pool may hold of a token.

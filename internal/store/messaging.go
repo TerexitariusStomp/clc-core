@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -34,7 +35,10 @@ type (
 	MessagingStore interface {
 		MessagingApprovedUserByAddress(context.Context, pgx.Tx, string) (MessagingUser, error)
 		MessagingUserByAddress(context.Context, pgx.Tx, string) (MessagingUser, error)
+		MessagingResourceByID(context.Context, pgx.Tx, int64, string, string) (MessagingResource, error)
+		MessagingVoucherByAddress(context.Context, pgx.Tx, int64, string) (MessagingVoucher, error)
 		GetConversationView(context.Context, pgx.Tx, int64, int64) (ConversationView, error)
+		GetDirectConversationViewByPeer(context.Context, pgx.Tx, int64, string) (ConversationView, error)
 		ListConversationViews(context.Context, pgx.Tx, int64, string, *Keyset, int) ([]ConversationView, error)
 		MessagingUnreadCounts(context.Context, pgx.Tx, int64) (MessagingUnread, error)
 		MemberConversation(context.Context, pgx.Tx, int64, int64, bool) (ConversationMembers, error)
@@ -83,6 +87,19 @@ type (
 		Avatar   *string `db:"avatar_url"`
 	}
 
+	MessagingResource struct {
+		Kind         string `db:"kind"`
+		ResourceID   string `db:"resource_id"`
+		ResourceName string `db:"resource_name"`
+		OwnerAddress string `db:"owner_address"`
+	}
+
+	MessagingVoucher struct {
+		Address string `db:"address"`
+		Name    string `db:"name"`
+		Symbol  string `db:"symbol"`
+	}
+
 	// ConversationMembers is a conversation row with its members' addresses,
 	// loaded by a query that already proved the caller may see it.
 	ConversationMembers struct {
@@ -98,28 +115,29 @@ type (
 
 	// ConversationView is one conversation as its caller sees it.
 	ConversationView struct {
-		ID                   int64      `db:"id"`
-		Kind                 string     `db:"kind"`
-		Status               string     `db:"status"`
-		ActorID              *int64     `db:"actor_id"`
-		Intro                *string    `db:"intro"`
-		LastMessageAt        *time.Time `db:"last_message_at"`
-		CreatedAt            time.Time  `db:"created_at"`
-		UpdatedAt            time.Time  `db:"updated_at"`
-		SortAt               time.Time  `db:"sort_at"`
-		PeerID               *int64     `db:"peer_id"`
-		PeerAddress          *string    `db:"peer_address"`
-		PeerUsername         *string    `db:"peer_username"`
-		PeerAvatar           *string    `db:"peer_avatar"`
-		Blocked              bool       `db:"blocked"`
-		LastReadMessageID    *int64     `db:"last_read_message_id"`
-		UnreadCount          int        `db:"unread_count"`
-		LastMessageID        *int64     `db:"last_message_id"`
-		LastMessageClientID  *string    `db:"last_message_client_id"`
-		LastMessageSenderID  *int64     `db:"last_message_sender_id"`
-		LastMessageBody      *string    `db:"last_message_body"`
-		LastMessageImageURLs []string   `db:"last_message_image_urls"`
-		LastMessageCreatedAt *time.Time `db:"last_message_created_at"`
+		ID                   int64           `db:"id"`
+		Kind                 string          `db:"kind"`
+		Status               string          `db:"status"`
+		ActorID              *int64          `db:"actor_id"`
+		Intro                *string         `db:"intro"`
+		LastMessageAt        *time.Time      `db:"last_message_at"`
+		CreatedAt            time.Time       `db:"created_at"`
+		UpdatedAt            time.Time       `db:"updated_at"`
+		SortAt               time.Time       `db:"sort_at"`
+		PeerID               *int64          `db:"peer_id"`
+		PeerAddress          *string         `db:"peer_address"`
+		PeerUsername         *string         `db:"peer_username"`
+		PeerAvatar           *string         `db:"peer_avatar"`
+		Blocked              bool            `db:"blocked"`
+		LastReadMessageID    *int64          `db:"last_read_message_id"`
+		UnreadCount          int             `db:"unread_count"`
+		LastMessageID        *int64          `db:"last_message_id"`
+		LastMessageClientID  *string         `db:"last_message_client_id"`
+		LastMessageSenderID  *int64          `db:"last_message_sender_id"`
+		LastMessageBody      *string         `db:"last_message_body"`
+		LastMessageImageURLs []string        `db:"last_message_image_urls"`
+		LastMessageContext   json.RawMessage `db:"last_message_context"`
+		LastMessageCreatedAt *time.Time      `db:"last_message_created_at"`
 	}
 
 	MessagingUnread struct {
@@ -134,14 +152,15 @@ type (
 	}
 
 	Message struct {
-		ID             int64     `db:"id"`
-		ConversationID int64     `db:"conversation_id"`
-		SenderUserID   int64     `db:"sender_user_id"`
-		SenderAddress  string    `db:"sender_address"`
-		ClientID       string    `db:"client_id"`
-		Body           *string   `db:"body"`
-		ImageURLs      []string  `db:"image_urls"`
-		CreatedAt      time.Time `db:"created_at"`
+		ID             int64           `db:"id"`
+		ConversationID int64           `db:"conversation_id"`
+		SenderUserID   int64           `db:"sender_user_id"`
+		SenderAddress  string          `db:"sender_address"`
+		ClientID       string          `db:"client_id"`
+		Body           *string         `db:"body"`
+		ImageURLs      []string        `db:"image_urls"`
+		Context        json.RawMessage `db:"resource_context"`
+		CreatedAt      time.Time       `db:"created_at"`
 	}
 
 	MessageWrite struct {
@@ -150,6 +169,7 @@ type (
 		ClientID       string
 		Body           *string
 		ImageURLs      []string
+		Context        json.RawMessage
 	}
 
 	// MessagePage selects the newest Limit messages below Before (0 for the
@@ -242,11 +262,33 @@ func (pg *Pg) MessagingUserByAddress(ctx context.Context, tx pgx.Tx, address str
 	return user, err
 }
 
+func (pg *Pg) MessagingResourceByID(ctx context.Context, tx pgx.Tx, chainID int64, kind, resourceID string) (MessagingResource, error) {
+	var resource MessagingResource
+	err := pgxscan.Get(ctx, tx, &resource, pg.queries.MessagingResourceByID, kind, resourceID, chainID)
+	return resource, err
+}
+
+func (pg *Pg) MessagingVoucherByAddress(ctx context.Context, tx pgx.Tx, chainID int64, address string) (MessagingVoucher, error) {
+	var voucher MessagingVoucher
+	err := pgxscan.Get(ctx, tx, &voucher, pg.queries.MessagingVoucherByAddress, chainID, address)
+	return voucher, err
+}
+
 // GetConversationView returns pgx.ErrNoRows for a missing id and a non-member alike.
 func (pg *Pg) GetConversationView(ctx context.Context, tx pgx.Tx, caller, id int64) (ConversationView, error) {
 	var view ConversationView
 	err := pgxscan.Get(ctx, tx, &view, pg.queries.MessagingGetConversation, caller, id)
 	return view, err
+}
+
+// GetDirectConversationViewByPeer finds the exact pair and uses the ordinary
+// caller-relative projection for the result, within the same read snapshot.
+func (pg *Pg) GetDirectConversationViewByPeer(ctx context.Context, tx pgx.Tx, caller int64, peerAddress string) (ConversationView, error) {
+	var id int64
+	if err := tx.QueryRow(ctx, pg.queries.MessagingDirectConversationIDByPeer, caller, peerAddress).Scan(&id); err != nil {
+		return ConversationView{}, err
+	}
+	return pg.GetConversationView(ctx, tx, caller, id)
 }
 
 func (pg *Pg) ListConversationViews(ctx context.Context, tx pgx.Tx, caller int64, kind string, after *Keyset, limit int) ([]ConversationView, error) {
@@ -345,7 +387,7 @@ func (pg *Pg) InsertMessage(ctx context.Context, tx pgx.Tx, write MessageWrite) 
 	}
 	var message Message
 	err := pgxscan.Get(ctx, tx, &message, pg.queries.MessagingInsertMessage,
-		write.ConversationID, write.SenderUserID, write.ClientID, write.Body, images)
+		write.ConversationID, write.SenderUserID, write.ClientID, write.Body, images, write.Context)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Message{}, false, nil
 	}
