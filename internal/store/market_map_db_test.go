@@ -190,6 +190,85 @@ func TestMarketMapMixedMarkersClustersFacetsAndCreditDB(t *testing.T) {
 	require.Empty(t, emptyList)
 }
 
+func TestRetiredVouchersAndPoolsLeaveEveryMapProjectionDB(t *testing.T) {
+	pg, tx, cleanup := newCatalogSearchTestPg(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const term = "Zqvxmapretired"
+	voucherID := seedSearchVoucher(t, tx, term+" voucher", "ZRETIRE")
+	_, err := tx.Exec(ctx, `UPDATE vouchers SET geo_lat=-3.68,geo_lng=39.83 WHERE id=$1`, voucherID)
+	require.NoError(t, err)
+
+	var poolID uint64
+	require.NoError(t, tx.QueryRow(ctx, `
+		INSERT INTO pools(chain_id,address,name,symbol,geo_lat,geo_lng)
+		VALUES(100,'0x'||lpad(to_hex((random()*1e18)::bigint),40,'0'),$1,'ZRETPOOL',-3.68,39.83)
+		RETURNING id`, term+" pool").Scan(&poolID))
+
+	var tag string
+	require.NoError(t, tx.QueryRow(ctx, `SELECT value FROM token_tag ORDER BY value LIMIT 1`).Scan(&tag))
+	_, err = tx.Exec(ctx, `INSERT INTO voucher_tags(voucher_id,tag_value) VALUES($1,$2)`, voucherID, tag)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `INSERT INTO pool_tags(pool_id,tag_value) VALUES($1,$2)`, poolID, tag)
+	require.NoError(t, err)
+
+	filter, err := NewCatalogFilter(term, nil, TagMatchAny)
+	require.NoError(t, err)
+	filter.Bounds = []CatalogBounds{{MinLng: 39.7, MinLat: -3.8, MaxLng: 40.2, MaxLat: -3.2}}
+	kinds := []string{"pool", "voucher"}
+
+	assertVisibleKinds := func(want ...string) {
+		t.Helper()
+		markers, markerErr := pg.ListMarketMap(ctx, tx, filter, kinds, 20, false)
+		require.NoError(t, markerErr)
+		markerKinds := make([]string, 0, len(markers.Features))
+		for _, feature := range markers.Features {
+			require.NotNil(t, feature.Kind)
+			markerKinds = append(markerKinds, *feature.Kind)
+		}
+		require.ElementsMatch(t, want, markerKinds)
+
+		points, pointErr := pg.ListMarketMapPoints(ctx, tx, filter, kinds)
+		require.NoError(t, pointErr)
+		pointKinds := make([]string, 0, len(points.Points))
+		for _, point := range points.Points {
+			pointKinds = append(pointKinds, point.Kind)
+		}
+		require.ElementsMatch(t, want, pointKinds)
+
+		facets, facetErr := pg.ListMarketMapTagFacets(ctx, tx, filter, kinds)
+		require.NoError(t, facetErr)
+		if len(want) == 0 {
+			require.Empty(t, facets)
+		} else {
+			require.Equal(t, []TagFacet{{Tag: tag, Count: uint64(len(want))}}, facets)
+		}
+
+		list, listErr := pg.ListMarketplace(ctx, tx, filter, kinds, nil, MarketplaceCursor{}, 20, false)
+		require.NoError(t, listErr)
+		listKinds := make([]string, 0, len(list))
+		for _, row := range list {
+			listKinds = append(listKinds, row.Kind)
+		}
+		require.ElementsMatch(t, want, listKinds)
+	}
+
+	assertVisibleKinds("pool", "voucher")
+	_, err = tx.Exec(ctx, `UPDATE vouchers SET active=false WHERE id=$1`, voucherID)
+	require.NoError(t, err)
+	assertVisibleKinds("pool")
+	_, err = tx.Exec(ctx, `UPDATE pools SET active=false WHERE id=$1`, poolID)
+	require.NoError(t, err)
+	assertVisibleKinds()
+
+	_, err = tx.Exec(ctx, `UPDATE vouchers SET active=true WHERE id=$1`, voucherID)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `UPDATE pools SET active=true WHERE id=$1`, poolID)
+	require.NoError(t, err)
+	assertVisibleKinds("pool", "voucher")
+}
+
 func TestDiscoveryBoundsParametersRetainFloatPrecisionDB(t *testing.T) {
 	pg, tx, cleanup := newCatalogSearchTestPg(t)
 	defer cleanup()

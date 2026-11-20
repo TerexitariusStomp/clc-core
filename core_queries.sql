@@ -4126,7 +4126,7 @@ WITH raw AS MATERIALIZED (
         LEFT JOIN offerings o ON o.voucher_id=v.id AND o.available
         WHERE x.pool_id=p.id AND x.is_allowed
     ) related ON true
-    WHERE p.geo_lat IS NOT NULL AND p.geo_lng IS NOT NULL
+    WHERE p.active AND p.geo_lat IS NOT NULL AND p.geo_lng IS NOT NULL
       AND (point(p.geo_lng,p.geo_lat) <@ box(
               point(CASE WHEN $9::BOOLEAN THEN $10::FLOAT8 ELSE -180::FLOAT8 END,CASE WHEN $9::BOOLEAN THEN $11::FLOAT8 ELSE -90::FLOAT8 END),
               point(CASE WHEN $9::BOOLEAN THEN $12::FLOAT8 ELSE 180::FLOAT8 END,CASE WHEN $9::BOOLEAN THEN $13::FLOAT8 ELSE 90::FLOAT8 END)) OR
@@ -4353,7 +4353,7 @@ WITH raw AS MATERIALIZED (
         LEFT JOIN offerings o ON o.voucher_id=v.id AND o.available
         WHERE x.pool_id=p.id AND x.is_allowed
     ) related ON true
-    WHERE p.geo_lat IS NOT NULL AND p.geo_lng IS NOT NULL
+    WHERE p.active AND p.geo_lat IS NOT NULL AND p.geo_lng IS NOT NULL
       AND (point(p.geo_lng,p.geo_lat) <@ box(
               point(CASE WHEN $8::BOOLEAN THEN $9::FLOAT8 ELSE -180::FLOAT8 END,CASE WHEN $8::BOOLEAN THEN $10::FLOAT8 ELSE -90::FLOAT8 END),
               point(CASE WHEN $8::BOOLEAN THEN $11::FLOAT8 ELSE 180::FLOAT8 END,CASE WHEN $8::BOOLEAN THEN $12::FLOAT8 ELSE 90::FLOAT8 END)) OR
