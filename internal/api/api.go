@@ -429,6 +429,7 @@ func New(o APIOpts) *API {
 		safeGroup.POST("/confirmations", a.safeConfirmationHandler)
 		safeGroup.GET("/transactions/:safeTxHash", a.safeTransactionHandler)
 		safeGroup.POST("/transactions/:safeTxHash/execute", a.safeExecuteHandler)
+		safeGroup.POST("/transactions/:safeTxHash/reject", a.safeRejectionHandler)
 		safeGroup.GET("/:address/pending", a.safePendingHandler)
 	}
 

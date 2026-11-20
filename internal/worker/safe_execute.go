@@ -172,6 +172,10 @@ func (w *SafeExecuteWorker) Work(ctx context.Context, job *river.Job[SafeExecute
 	case errors.Is(err, safe.ErrSettled):
 		// Executed elsewhere or replaced.
 		return nil
+	case errors.Is(err, safe.ErrRejectedBySigners):
+		// A threshold-confirmed same-nonce rejection wins until an action has
+		// actually been submitted. Its own execution job consumes the nonce.
+		return nil
 	case errors.Is(err, safe.ErrNotReady):
 		// STS may briefly lag the final confirmation. Retry, and expose a failed
 		// state if the bounded attempts are exhausted so a signer can retry.

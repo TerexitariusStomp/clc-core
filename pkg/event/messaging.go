@@ -14,6 +14,9 @@ const (
 	SafeProposed           = "safe.proposed"
 	SafeConfirmed          = "safe.confirmed"
 	SafeApproved           = "safe.approved"
+	SafeRejectionProposed  = "safe.rejection_proposed"
+	SafeRejectionConfirmed = "safe.rejection_confirmed"
+	SafeRejectionApproved  = "safe.rejection_approved"
 	MessagingStream        = "MESSAGING"
 	MessagingSubjectPrefix = MessagingStream + "."
 )
@@ -60,11 +63,14 @@ type (
 	}
 
 	MessagingSafeApproval struct {
-		SafeAddress       string `json:"safeAddress"`
-		SafeTxHash        string `json:"safeTxHash"`
-		Stage             string `json:"stage"`
-		Approvals         int    `json:"approvals"`
-		ApprovalsRequired int    `json:"approvalsRequired"`
-		Proposed          bool   `json:"proposed"`
+		SafeAddress         string   `json:"safeAddress"`
+		SafeTxHash          string   `json:"safeTxHash"`
+		Stage               string   `json:"stage"`
+		Approvals           int      `json:"approvals"`
+		ApprovalsRequired   int      `json:"approvalsRequired"`
+		Proposed            bool     `json:"proposed"`
+		TransactionKind     string   `json:"transactionKind"`
+		Action              string   `json:"action,omitempty"`
+		RejectsSafeTxHashes []string `json:"rejectsSafeTxHashes,omitempty"`
 	}
 )

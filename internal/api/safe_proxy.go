@@ -74,6 +74,12 @@ type (
 		Signature  string `json:"signature"`
 	}
 
+	safeRejectionRequest struct {
+		SafeTxHash string        `json:"safeTxHash"`
+		Signature  string        `json:"signature"`
+		Tx         safe.TxFields `json:"tx"`
+	}
+
 	// proxyError carries the HTTP outcome of a rejected proxy call.
 	proxyError struct {
 		status  int
@@ -248,6 +254,41 @@ func (s *safeService) queueExecution(ctx context.Context, tx *safe.Transaction) 
 	tx.Executing = tx.ExecutionState == safe.ExecutionQueued || tx.ExecutionState == safe.ExecutionSubmitted
 }
 
+// annotateRejections identifies the canonical no-op sharing a nonce with one
+// or more actions. A single rejection cancels every action at that nonce.
+func annotateRejections(safeAddress common.Address, txs []safe.Transaction) {
+	byNonce := make(map[string][]int)
+	for i := range txs {
+		byNonce[txs[i].Nonce] = append(byNonce[txs[i].Nonce], i)
+		if safe.IsRejection(safeAddress, txs[i].TxFields) {
+			txs[i].TransactionKind = "rejection"
+		} else {
+			txs[i].TransactionKind = "action"
+		}
+	}
+	for _, indexes := range byNonce {
+		var rejection *int
+		for _, index := range indexes {
+			if txs[index].TransactionKind == "rejection" {
+				rejection = &index
+				break
+			}
+		}
+		if rejection == nil {
+			continue
+		}
+		for _, index := range indexes {
+			if index == *rejection {
+				continue
+			}
+			hash := strings.ToLower(txs[index].SafeTxHash)
+			txs[*rejection].RejectsSafeTxHashes = append(txs[*rejection].RejectsSafeTxHashes, hash)
+			rejectionHash := strings.ToLower(txs[*rejection].SafeTxHash)
+			txs[index].RejectedBySafeTxHash = &rejectionHash
+		}
+	}
+}
+
 func (s *safeService) markExecution(ctx context.Context, txs []safe.Transaction, currentNonce string) {
 	if s.executionStates == nil || len(txs) == 0 {
 		return
@@ -340,7 +381,106 @@ func (s *safeService) pending(ctx context.Context, caller, safeAddress string) (
 		}
 	}
 	s.markExecution(ctx, results, nonce)
+	annotateRejections(address, results)
 	return results, nil
+}
+
+// reject proposes or confirms Safe's canonical same-nonce cancellation. It is
+// idempotent per signer and reuses an existing rejection when another signer
+// started it first.
+func (s *safeService) reject(ctx context.Context, caller, originalHash string, req safeRejectionRequest) (*safe.Transaction, error) {
+	if !safeTxHashPattern.MatchString(originalHash) || !safeTxHashPattern.MatchString(req.SafeTxHash) {
+		return nil, badRequest("invalid safeTxHash")
+	}
+	original, err := s.sts.Transaction(ctx, originalHash)
+	if err != nil {
+		return nil, upstreamError(err)
+	}
+	if original.IsExecuted || !common.IsHexAddress(original.Safe) {
+		return nil, &proxyError{http.StatusConflict, apiresp.ErrCodeConflict, "Safe transaction is no longer pending"}
+	}
+	safeAddress := common.HexToAddress(original.Safe)
+	if safe.IsRejection(safeAddress, original.TxFields) {
+		return nil, badRequest("a rejection cannot reject another rejection")
+	}
+	if err := s.requireSigner(ctx, caller, safeAddress); err != nil {
+		return nil, err
+	}
+	if !safe.IsRejection(safeAddress, req.Tx) || req.Tx.Nonce != original.Nonce {
+		return nil, badRequest("rejection must be the canonical Safe no-op at the proposal nonce")
+	}
+	hash, err := s.verifyTransaction(ctx, safeAddress, req.SafeTxHash, req.Tx)
+	if err != nil {
+		return nil, err
+	}
+	signer, err := s.signerOf(ctx, safeAddress, hash, req.Signature)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(signer.Hex(), caller) {
+		return nil, forbidden("signature was not made by the signed-in account")
+	}
+
+	nonce, err := s.sts.Nonce(ctx, safeAddress.Hex())
+	if err != nil {
+		return nil, upstreamError(err)
+	}
+	queued, err := s.sts.Queued(ctx, safeAddress.Hex(), nonce)
+	if err != nil {
+		return nil, upstreamError(err)
+	}
+	var existing *safe.Transaction
+	for i := range queued {
+		if queued[i].Nonce == original.Nonce && safe.IsRejection(safeAddress, queued[i].TxFields) {
+			existing = &queued[i]
+			break
+		}
+	}
+	if existing != nil {
+		if !strings.EqualFold(existing.SafeTxHash, hash.Hex()) {
+			return nil, &proxyError{http.StatusConflict, apiresp.ErrCodeConflict, "a different Safe rejection already exists for this nonce"}
+		}
+		alreadySigned := false
+		for _, confirmation := range existing.Confirmations {
+			if strings.EqualFold(confirmation.Owner, signer.Hex()) {
+				alreadySigned = true
+				break
+			}
+		}
+		if !alreadySigned {
+			if err := s.sts.Confirm(ctx, hash.Hex(), req.Signature); err != nil {
+				return nil, upstreamError(err)
+			}
+		}
+	} else if proposeErr := s.sts.Propose(ctx, safeAddress.Hex(), hash.Hex(), signer.Hex(), req.Signature, req.Tx); proposeErr != nil {
+		// Two signers can create the deterministic rejection concurrently. If
+		// the other proposal won the race, join it rather than surfacing a
+		// conflict for the same canonical transaction.
+		raced, lookupErr := s.sts.Transaction(ctx, hash.Hex())
+		if lookupErr != nil || !strings.EqualFold(raced.SafeTxHash, hash.Hex()) {
+			return nil, upstreamError(proposeErr)
+		}
+		alreadySigned := false
+		for _, confirmation := range raced.Confirmations {
+			alreadySigned = alreadySigned || strings.EqualFold(confirmation.Owner, signer.Hex())
+		}
+		if !alreadySigned {
+			if err := s.sts.Confirm(ctx, hash.Hex(), req.Signature); err != nil {
+				return nil, upstreamError(err)
+			}
+		}
+	}
+	updated, err := s.sts.Transaction(ctx, hash.Hex())
+	if err != nil {
+		return nil, upstreamError(err)
+	}
+	updated.TransactionKind = "rejection"
+	updated.RejectsSafeTxHashes = []string{strings.ToLower(original.SafeTxHash)}
+	s.queueExecution(ctx, updated)
+	if s.syncApproval != nil {
+		s.syncApproval(ctx, updated.Safe, updated.SafeTxHash)
+	}
+	return updated, nil
 }
 
 func (s *safeService) transaction(ctx context.Context, caller, safeTxHash string) (*safe.Transaction, error) {
@@ -363,6 +503,9 @@ func (s *safeService) transaction(ctx context.Context, caller, safeTxHash string
 	}
 	single := []safe.Transaction{*tx}
 	s.markExecution(ctx, single, nonce)
+	if common.IsHexAddress(tx.Safe) {
+		annotateRejections(common.HexToAddress(tx.Safe), single)
+	}
 	return &single[0], nil
 }
 
@@ -616,6 +759,19 @@ func (a *API) safeConfirmationHandler(c *echo.Context) error {
 		return a.writeProxyError(c, err)
 	}
 	return a.writeProxyResult(c, "Safe transaction confirmed", tx)
+}
+
+func (a *API) safeRejectionHandler(c *echo.Context) error {
+	var req safeRejectionRequest
+	if err := c.Bind(&req); err != nil {
+		return handleBindError(c, err)
+	}
+	_, caller, _ := getUserClaims(c)
+	tx, err := a.safeProxy.reject(c.Request().Context(), caller, c.Param("safeTxHash"), req)
+	if err != nil {
+		return a.writeProxyError(c, err)
+	}
+	return a.writeProxyResult(c, "Safe rejection signed", tx)
 }
 
 func (a *API) safePendingHandler(c *echo.Context) error {
