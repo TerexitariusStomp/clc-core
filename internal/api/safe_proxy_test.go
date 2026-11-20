@@ -33,11 +33,12 @@ type (
 	}
 
 	fakeSTS struct {
-		stored    *safe.Transaction
-		proposed  []string
-		confirmed []string
-		queued    []safe.Transaction
-		err       error
+		stored       *safe.Transaction
+		transactions map[string]*safe.Transaction
+		proposed     []string
+		confirmed    []string
+		queued       []safe.Transaction
+		err          error
 	}
 
 	// fakeContractVerifier stands in for a Safe and a Calibur owner on chain.
@@ -81,9 +82,12 @@ func (f *fakeSTS) Confirm(_ context.Context, hash, _ string) error {
 	return nil
 }
 
-func (f *fakeSTS) Transaction(context.Context, string) (*safe.Transaction, error) {
+func (f *fakeSTS) Transaction(_ context.Context, hash string) (*safe.Transaction, error) {
 	if f.err != nil {
 		return nil, f.err
+	}
+	if tx := f.transactions[strings.ToLower(hash)]; tx != nil {
+		return tx, nil
 	}
 	return f.stored, nil
 }
@@ -157,6 +161,75 @@ func TestProposeAcceptsASignersPolicyCompliantTransaction(t *testing.T) {
 	if len(f.sts.proposed) != 1 || !strings.EqualFold(f.sts.proposed[0], req.SafeTxHash+":"+f.key) {
 		t.Fatalf("proposed %v", f.sts.proposed)
 	}
+}
+
+func TestRejectProposesCanonicalSameNonceTransaction(t *testing.T) {
+	f := newProxyFixture(t, true)
+	originalFields := txFor(proxyAsset, ownershipCall())
+	originalHash, err := safe.SafeTxHash(100, proxySafe, originalFields)
+	require.NoError(t, err)
+	original := &safe.Transaction{TxFields: originalFields, Safe: proxySafe.Hex(), SafeTxHash: originalHash.Hex()}
+	f.sts.transactions = map[string]*safe.Transaction{strings.ToLower(originalHash.Hex()): original}
+	rejection := txFor(proxySafe, nil)
+	rejection.Data = "0x"
+	rejectionHash, err := safe.SafeTxHash(100, proxySafe, rejection)
+	require.NoError(t, err)
+	f.sts.queued = []safe.Transaction{*original}
+	// The fake returns the just-created transaction after STS accepts it.
+	f.sts.transactions[strings.ToLower(rejectionHash.Hex())] = &safe.Transaction{TxFields: rejection, Safe: proxySafe.Hex(), SafeTxHash: rejectionHash.Hex(), ConfirmationsRequired: 2}
+
+	got, err := f.svc.reject(context.Background(), f.key, originalHash.Hex(), safeRejectionRequest{
+		SafeTxHash: rejectionHash.Hex(), Signature: f.sign(rejectionHash), Tx: rejection,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "rejection", got.TransactionKind)
+	require.Equal(t, []string{strings.ToLower(originalHash.Hex())}, got.RejectsSafeTxHashes)
+	require.Len(t, f.sts.proposed, 1)
+}
+
+func TestRejectRetryRequeuesNotificationSyncWithoutDuplicateConfirmation(t *testing.T) {
+	f := newProxyFixture(t, true)
+	originalFields := txFor(proxyAsset, ownershipCall())
+	originalHash, err := safe.SafeTxHash(100, proxySafe, originalFields)
+	require.NoError(t, err)
+	rejection := txFor(proxySafe, nil)
+	rejection.Data = "0x"
+	rejectionHash, err := safe.SafeTxHash(100, proxySafe, rejection)
+	require.NoError(t, err)
+	original := safe.Transaction{TxFields: originalFields, Safe: proxySafe.Hex(), SafeTxHash: originalHash.Hex()}
+	existing := safe.Transaction{
+		TxFields: rejection, Safe: proxySafe.Hex(), SafeTxHash: rejectionHash.Hex(),
+		Confirmations: []safe.Confirmation{{Owner: f.key}}, ConfirmationsRequired: 2,
+	}
+	f.sts.transactions = map[string]*safe.Transaction{
+		strings.ToLower(originalHash.Hex()):  &original,
+		strings.ToLower(rejectionHash.Hex()): &existing,
+	}
+	f.sts.queued = []safe.Transaction{original, existing}
+	synced := 0
+	f.svc.syncApproval = func(context.Context, string, string) { synced++ }
+
+	_, err = f.svc.reject(context.Background(), f.key, originalHash.Hex(), safeRejectionRequest{
+		SafeTxHash: rejectionHash.Hex(), Signature: f.sign(rejectionHash), Tx: rejection,
+	})
+	require.NoError(t, err)
+	require.Empty(t, f.sts.confirmed)
+	require.Equal(t, 1, synced)
+}
+
+func TestAnnotateRejectionsLinksEveryActionAtTheNonce(t *testing.T) {
+	actionA := safe.Transaction{TxFields: txFor(proxyAsset, ownershipCall()), SafeTxHash: "0x" + strings.Repeat("a", 64)}
+	actionB := safe.Transaction{TxFields: txFor(proxyAsset, ownershipCall()), SafeTxHash: "0x" + strings.Repeat("b", 64)}
+	rejectionFields := txFor(proxySafe, nil)
+	rejectionFields.Data = "0x"
+	rejection := safe.Transaction{TxFields: rejectionFields, SafeTxHash: "0x" + strings.Repeat("c", 64)}
+	txs := []safe.Transaction{actionA, rejection, actionB}
+
+	annotateRejections(proxySafe, txs)
+	require.Equal(t, "action", txs[0].TransactionKind)
+	require.Equal(t, "rejection", txs[1].TransactionKind)
+	require.Equal(t, []string{strings.ToLower(actionA.SafeTxHash), strings.ToLower(actionB.SafeTxHash)}, txs[1].RejectsSafeTxHashes)
+	require.Equal(t, strings.ToLower(rejection.SafeTxHash), *txs[2].RejectedBySafeTxHash)
 }
 
 func TestProposeRejections(t *testing.T) {

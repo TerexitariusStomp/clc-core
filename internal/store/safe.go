@@ -32,9 +32,11 @@ type (
 	}
 
 	SafeApprovalResource struct {
-		Kind    string
-		Address string
-		Name    string
+		Kind           string
+		Address        string
+		Name           string
+		VoucherAddress string
+		VoucherName    string
 	}
 
 	SafeExecutionProgress struct {

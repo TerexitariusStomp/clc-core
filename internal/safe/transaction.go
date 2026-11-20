@@ -51,6 +51,11 @@ type (
 		// Executing: clc-core has queued or sent the execution itself.
 		Executing      bool           `json:"executing"`
 		ExecutionState ExecutionState `json:"executionState,omitempty"`
+		// TransactionKind and rejection links are derived from the queued Safe
+		// transactions. They do not alter the Safe Transaction Service object.
+		TransactionKind      string   `json:"transactionKind,omitempty"`
+		RejectsSafeTxHashes  []string `json:"rejectsSafeTxHashes,omitempty"`
+		RejectedBySafeTxHash *string  `json:"rejectedBySafeTxHash,omitempty"`
 	}
 )
 
@@ -118,6 +123,19 @@ func (f TxFields) Exec() (*Exec, error) {
 		return nil, fmt.Errorf("invalid data")
 	}
 	return &e, nil
+}
+
+// IsRejection reports whether fields are Safe's canonical same-nonce
+// cancellation: an empty, zero-value CALL to the Safe with no gas refund.
+func IsRejection(safe common.Address, f TxFields) bool {
+	exec, err := f.Exec()
+	if err != nil {
+		return false
+	}
+	return exec.To == safe && exec.Value.Sign() == 0 && len(exec.Data) == 0 &&
+		exec.Operation == OperationCall && exec.SafeTxGas.Sign() == 0 &&
+		exec.BaseGas.Sign() == 0 && exec.GasPrice.Sign() == 0 &&
+		exec.GasToken == (common.Address{}) && exec.RefundReceiver == (common.Address{})
 }
 
 // SafeTxHash is the EIP-712 digest owners sign: domain {chainId,

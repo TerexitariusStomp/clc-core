@@ -33,10 +33,19 @@ func TestSafeApprovalStage(t *testing.T) {
 		{3, 3, event.SafeConfirmed, false},
 	}
 	for _, test := range tests {
-		kind, proposed := safeApprovalStage(test.index, test.required)
+		kind, proposed := safeApprovalStage(test.index, test.required, false)
 		require.Equal(t, test.kind, kind)
 		require.Equal(t, test.proposed, proposed)
 	}
+}
+
+func TestSafeRejectionStage(t *testing.T) {
+	kind, proposed := safeApprovalStage(0, 2, true)
+	require.Equal(t, event.SafeRejectionProposed, kind)
+	require.True(t, proposed)
+	kind, proposed = safeApprovalStage(1, 2, true)
+	require.Equal(t, event.SafeRejectionApproved, kind)
+	require.False(t, proposed)
 }
 
 func TestSafeApprovalTargetsDeduplicatesAndRecognizesSelfManagement(t *testing.T) {
