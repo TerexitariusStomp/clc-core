@@ -11,6 +11,11 @@ import (
 )
 
 type (
+	// ExecutionState describes clc-core's sponsored execution lifecycle. It is
+	// intentionally separate from Safe's confirmation state so clients can
+	// offer a deterministic retry without guessing from a stale spinner.
+	ExecutionState string
+
 	// TxFields is a Safe transaction as clients and the Transaction Service
 	// carry it: every number a decimal string, data 0x-hex.
 	TxFields struct {
@@ -44,8 +49,22 @@ type (
 		IsSuccessful          *bool          `json:"isSuccessful"`
 		TransactionHash       *string        `json:"transactionHash"`
 		// Executing: clc-core has queued or sent the execution itself.
-		Executing bool `json:"executing"`
+		Executing      bool           `json:"executing"`
+		ExecutionState ExecutionState `json:"executionState,omitempty"`
+		// TransactionKind and rejection links are derived from the queued Safe
+		// transactions. They do not alter the Safe Transaction Service object.
+		TransactionKind      string   `json:"transactionKind,omitempty"`
+		RejectsSafeTxHashes  []string `json:"rejectsSafeTxHashes,omitempty"`
+		RejectedBySafeTxHash *string  `json:"rejectedBySafeTxHash,omitempty"`
 	}
+)
+
+const (
+	ExecutionReady     ExecutionState = "ready"
+	ExecutionQueued    ExecutionState = "queued"
+	ExecutionSubmitted ExecutionState = "submitted"
+	ExecutionWaiting   ExecutionState = "waiting"
+	ExecutionFailed    ExecutionState = "failed"
 )
 
 var (
@@ -104,6 +123,19 @@ func (f TxFields) Exec() (*Exec, error) {
 		return nil, fmt.Errorf("invalid data")
 	}
 	return &e, nil
+}
+
+// IsRejection reports whether fields are Safe's canonical same-nonce
+// cancellation: an empty, zero-value CALL to the Safe with no gas refund.
+func IsRejection(safe common.Address, f TxFields) bool {
+	exec, err := f.Exec()
+	if err != nil {
+		return false
+	}
+	return exec.To == safe && exec.Value.Sign() == 0 && len(exec.Data) == 0 &&
+		exec.Operation == OperationCall && exec.SafeTxGas.Sign() == 0 &&
+		exec.BaseGas.Sign() == 0 && exec.GasPrice.Sign() == 0 &&
+		exec.GasToken == (common.Address{}) && exec.RefundReceiver == (common.Address{})
 }
 
 // SafeTxHash is the EIP-712 digest owners sign: domain {chainId,

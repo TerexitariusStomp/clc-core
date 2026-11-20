@@ -74,6 +74,8 @@ func TestRetirementLifecycle(t *testing.T) {
 				}()
 			}
 			path := "/api/v2/" + kind + "s/" + address + "/retirement-requests"
+			cacheKey := "retirement-lifecycle-" + kind
+			a.marketMapCache.set(cacheKey, store.MarketMapResult{})
 			for _, token := range []string{other, admin} {
 				response, _ := offeringRequest(t, a, http.MethodPost, path, token, map[string]any{"reason": "Request"})
 				require.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
@@ -82,6 +84,8 @@ func TestRetirementLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, response.Code)
 			response, result := offeringRequest(t, a, http.MethodPost, path, owner, map[string]any{"reason": " End of use "})
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			_, cached := a.marketMapCache.get(cacheKey)
+			require.True(t, cached, "a pending retirement must not invalidate public map results")
 			id := retirementRequestNumber(t, result)
 			var active bool
 			require.NoError(t, a.store.Pool().QueryRow(ctx, "SELECT active FROM "+kind+"s WHERE lower(address)=lower($1)", address).Scan(&active))
@@ -101,6 +105,8 @@ func TestRetirementLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
 			response, _ = offeringRequest(t, a, http.MethodPut, decision, admin, map[string]any{"acknowledgeBalances": true})
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			_, cached = a.marketMapCache.get(cacheKey)
+			require.False(t, cached, "an approved retirement must invalidate public map results")
 			require.NoError(t, a.store.Pool().QueryRow(ctx, "SELECT active FROM "+kind+"s WHERE lower(address)=lower($1)", address).Scan(&active))
 			require.False(t, active)
 			response, _ = offeringRequest(t, a, http.MethodPut, decision, admin, map[string]any{"acknowledgeBalances": true})
@@ -109,10 +115,16 @@ func TestRetirementLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusOK, response.Code)
 			require.NotEmpty(t, result["requests"])
 			restore := "/api/v2/admin/" + kind + "s/" + address + "/restore"
+			a.marketMapCache.set(cacheKey, store.MarketMapResult{})
 			response, _ = offeringRequest(t, a, http.MethodPut, restore, admin, map[string]any{"reason": "Approved return"})
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			_, cached = a.marketMapCache.get(cacheKey)
+			require.False(t, cached, "a restoration must invalidate public map results")
+			a.marketMapCache.set(cacheKey, store.MarketMapResult{})
 			response, _ = offeringRequest(t, a, http.MethodPut, restore, admin, map[string]any{"reason": "Repeated restore"})
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			_, cached = a.marketMapCache.get(cacheKey)
+			require.True(t, cached, "a no-op restoration must preserve public map results")
 			require.NoError(t, a.store.Pool().QueryRow(ctx, "SELECT active FROM "+kind+"s WHERE lower(address)=lower($1)", address).Scan(&active))
 			require.True(t, active)
 			response, result = offeringRequest(t, a, http.MethodGet, "/api/v2/admin/"+kind+"s/"+address+"/retirement-history", admin, nil)

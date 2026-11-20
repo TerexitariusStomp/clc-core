@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/cosmo-local-credit/clc-core/internal/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,21 +55,31 @@ func TestAdminDirectResourceRetirement(t *testing.T) {
 			require.Equal(t, http.StatusConflict, response.Code, "balances need an acknowledgement")
 			require.True(t, active())
 
+			cacheKey := "admin-direct-retirement-" + kind
+			a.marketMapCache.set(cacheKey, store.MarketMapResult{})
 			response, _ = offeringRequest(t, a, http.MethodPut, retire, admin, map[string]any{"acknowledgeBalances": true})
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 			require.False(t, active())
+			_, cached := a.marketMapCache.get(cacheKey)
+			require.False(t, cached, "a direct retirement must invalidate public map results")
 			require.Equal(t, 1, events())
 			require.Equal(t, 1, countRows(t, a, "SELECT count(*) FROM retirement_requests WHERE "+column+"=$1 AND source='ADMIN' AND status='approved'", id))
 
+			a.marketMapCache.set(cacheKey, store.MarketMapResult{})
 			response, result := offeringRequest(t, a, http.MethodPut, retire, admin, map[string]any{"acknowledgeBalances": true})
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 			require.Equal(t, false, result["changed"])
+			_, cached = a.marketMapCache.get(cacheKey)
+			require.True(t, cached, "a no-op retirement must preserve public map results")
 			require.Equal(t, 1, events(), "a repeated retirement writes no event")
 
 			restore := "/api/v2/admin/" + kind + "s/" + address + "/restore"
+			a.marketMapCache.set(cacheKey, store.MarketMapResult{})
 			response, _ = offeringRequest(t, a, http.MethodPut, restore, admin, map[string]any{"reason": "Back in use"})
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 			require.True(t, active())
+			_, cached = a.marketMapCache.get(cacheKey)
+			require.False(t, cached, "a restoration must invalidate public map results")
 
 			path := "/api/v2/" + kind + "s/" + address + "/retirement-requests"
 			response, _ = offeringRequest(t, a, http.MethodPost, path, owner, map[string]any{"reason": "End of use"})

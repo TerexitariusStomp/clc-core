@@ -29,6 +29,8 @@ var (
 	ErrNotReady = errors.New("safe: not enough valid confirmations")
 	// ErrNotNext: an earlier nonce is still queued; Safe executes in order.
 	ErrNotNext = errors.New("safe: an earlier transaction is still pending")
+	// ErrRejectedBySigners: a threshold-confirmed canonical rejection owns this nonce.
+	ErrRejectedBySigners = errors.New("safe: transaction rejected by signers")
 
 	errUnsupportedSignature = errors.New("safe: unsupported signature type")
 
@@ -40,6 +42,9 @@ type (
 	// satisfies it.
 	TransactionSource interface {
 		Transaction(ctx context.Context, safeTxHash string) (*Transaction, error)
+	}
+	queuedTransactionSource interface {
+		Queued(ctx context.Context, safe, nonceGte string) ([]Transaction, error)
 	}
 
 	// ExecStateReader reads a Safe's signer set, threshold and next nonce at
@@ -119,6 +124,27 @@ func (e *Executor) Prepare(ctx context.Context, safeTxHash string) (*Execution, 
 		return nil, ErrSettled
 	case 1:
 		return nil, ErrNotNext
+	}
+	if !IsRejection(safe, tx.TxFields) {
+		if queued, ok := e.sts.(queuedTransactionSource); ok {
+			competitors, err := queued.Queued(ctx, safe.Hex(), tx.Nonce)
+			if err != nil {
+				return nil, err
+			}
+			for i := range competitors {
+				candidate := &competitors[i]
+				if candidate.Nonce != tx.Nonce || candidate.IsExecuted || !IsRejection(safe, candidate.TxFields) {
+					continue
+				}
+				rejectionHash, err := SafeTxHash(e.chainID, safe, candidate.TxFields)
+				if err != nil || !strings.EqualFold(rejectionHash.Hex(), candidate.SafeTxHash) {
+					continue
+				}
+				if _, err := PackSignatures(ctx, rejectionHash, candidate.Confirmations, state.Owners, state.Threshold, state.Contracts); err == nil {
+					return nil, ErrRejectedBySigners
+				}
+			}
+		}
 	}
 
 	exec.Signatures, err = PackSignatures(ctx, hash, tx.Confirmations, state.Owners, state.Threshold, state.Contracts)

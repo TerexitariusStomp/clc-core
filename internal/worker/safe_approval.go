@@ -11,9 +11,11 @@ import (
 	"github.com/cosmo-local-credit/clc-core/internal/safe"
 	"github.com/cosmo-local-credit/clc-core/pkg/event"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 
 var (
 	safeApprovalEventNamespace = uuid.MustParse("48b74931-52dc-4c55-a884-1b14e68893c1")
+	addVoucherSelector         = crypto.Keccak256([]byte("add(address)"))[:4]
 )
 
 type (
@@ -59,6 +62,13 @@ type (
 func (SafeApprovalSyncArgs) Kind() string      { return "SAFE_APPROVAL_SYNC" }
 func (SafeApprovalReconcileArgs) Kind() string { return "SAFE_APPROVAL_RECONCILE" }
 
+func safeApprovalSyncInsertOpts() *river.InsertOpts {
+	return &river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true, ByState: []rivertype.JobState{
+		rivertype.JobStateAvailable, rivertype.JobStatePending, rivertype.JobStateRunning,
+		rivertype.JobStateRetryable, rivertype.JobStateScheduled,
+	}}}
+}
+
 func EnqueueSafeApprovalSync(ctx context.Context, queue *river.Client[pgx.Tx], safeAddress, safeTxHash string) error {
 	if queue == nil {
 		return errors.New("safe approval sync: no queue client")
@@ -72,7 +82,7 @@ func EnqueueSafeApprovalSync(ctx context.Context, queue *river.Client[pgx.Tx], s
 	_, err := queue.Insert(ctx, SafeApprovalSyncArgs{
 		SafeAddress: common.HexToAddress(safeAddress).Hex(),
 		SafeTxHash:  strings.ToLower(safeTxHash),
-	}, &river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true}})
+	}, safeApprovalSyncInsertOpts())
 	return err
 }
 
@@ -157,7 +167,43 @@ func (w *SafeApprovalSyncWorker) syncTransaction(ctx context.Context, safeTx *sa
 		}
 		return err
 	}
-	targets, allOwned := safeApprovalTargets(common.HexToAddress(safeTx.Safe), exec, w.policy)
+	safeAddress := common.HexToAddress(safeTx.Safe)
+	isRejection := safe.IsRejection(safeAddress, safeTx.TxFields)
+	relatedHashes := []string(nil)
+	relatedExecs := []*safe.Exec(nil)
+	if isRejection {
+		queued, qErr := w.sts.Queued(ctx, safeTx.Safe, safeTx.Nonce)
+		if qErr != nil {
+			return qErr
+		}
+		for i := range queued {
+			if queued[i].Nonce != safeTx.Nonce || safe.IsRejection(safeAddress, queued[i].TxFields) {
+				continue
+			}
+			candidate, decodeErr := queued[i].Exec()
+			if decodeErr != nil || w.policy.CheckTransaction(ctx, safeAddress, candidate) != nil {
+				continue
+			}
+			relatedHashes = append(relatedHashes, strings.ToLower(queued[i].SafeTxHash))
+			relatedExecs = append(relatedExecs, candidate)
+		}
+	}
+	targets, allOwned := safeApprovalTargets(safeAddress, exec, w.policy)
+	if isRejection {
+		targets, allOwned = nil, false
+		for _, related := range relatedExecs {
+			more, ownsAll := safeApprovalTargets(safeAddress, related, w.policy)
+			targets = append(targets, more...)
+			allOwned = allOwned || ownsAll
+		}
+		targets = deduplicateStrings(targets)
+	}
+	notificationAction := safeApprovalAction(exec, safeAddress, w.policy)
+	if isRejection && len(relatedExecs) > 0 {
+		// Describe the action being rejected, while TransactionKind keeps the
+		// notification itself unambiguously identified as a rejection.
+		notificationAction = safeApprovalAction(relatedExecs[0], safeAddress, w.policy)
+	}
 	confirmations := append([]safe.Confirmation(nil), safeTx.Confirmations...)
 	sort.SliceStable(confirmations, func(i, j int) bool {
 		if confirmations[i].SubmittedAt == confirmations[j].SubmittedAt {
@@ -171,6 +217,12 @@ func (w *SafeApprovalSyncWorker) syncTransaction(ctx context.Context, safeTx *sa
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if w.wc.safeExecutor != nil && !safeTx.IsExecuted && safeTx.ConfirmationsRequired > 0 &&
+		len(confirmations) >= safeTx.ConfirmationsRequired {
+		if err := EnqueueSafeExecutionTx(ctx, w.wc.queueClient, tx, safeTx.Safe, safeTx.SafeTxHash); err != nil {
+			return err
+		}
+	}
 	audience, err := w.wc.store.ListOwnerMessageTargets(ctx, tx, w.wc.chainID, safeTx.Safe)
 	if err != nil {
 		return err
@@ -180,7 +232,25 @@ func (w *SafeApprovalSyncWorker) syncTransaction(ctx context.Context, safeTx *sa
 		return err
 	}
 	if len(audience) == 0 || len(resources) == 0 {
+		w.wc.logg.Warn("safe approval notification skipped", "safe", safeTx.Safe, "safeTxHash", safeTx.SafeTxHash,
+			"audience", len(audience), "resources", len(resources), "rejection", isRejection)
 		return tx.Commit(ctx)
+	}
+	for _, candidateExec := range append([]*safe.Exec{exec}, relatedExecs...) {
+		candidate := safeApprovalVoucherCandidate(candidateExec, w.policy)
+		if candidate == "" {
+			continue
+		}
+		voucher, lookupErr := w.wc.store.MessagingVoucherByAddress(ctx, tx, w.wc.chainID, candidate)
+		if lookupErr == nil {
+			for i := range resources {
+				if resources[i].Kind == "pool" {
+					resources[i].VoucherAddress = voucher.Address
+					resources[i].VoucherName = voucher.Name
+				}
+			}
+		}
+		break
 	}
 
 	for index, confirmation := range confirmations {
@@ -199,7 +269,7 @@ func (w *SafeApprovalSyncWorker) syncTransaction(ctx context.Context, safeTx *sa
 		if !emit {
 			continue
 		}
-		kind, proposed := safeApprovalStage(index, safeTx.ConfirmationsRequired)
+		kind, proposed := safeApprovalStage(index, safeTx.ConfirmationsRequired, isRejection)
 		actorID := int64(0)
 		for _, member := range audience {
 			if strings.EqualFold(member.Address, confirmation.Owner) {
@@ -223,10 +293,13 @@ func (w *SafeApprovalSyncWorker) syncTransaction(ctx context.Context, safeTx *sa
 				SafeApproval: &event.MessagingSafeApproval{
 					SafeAddress: common.HexToAddress(safeTx.Safe).Hex(), SafeTxHash: strings.ToLower(safeTx.SafeTxHash),
 					Stage: kind, Approvals: index + 1, ApprovalsRequired: safeTx.ConfirmationsRequired, Proposed: proposed,
+					TransactionKind: map[bool]string{true: "rejection", false: "action"}[isRejection],
+					Action:          notificationAction, RejectsSafeTxHashes: relatedHashes,
 				},
 			}
 			for _, resource := range resources {
-				ev.Resources = append(ev.Resources, event.MessagingResource{Kind: resource.Kind, Address: common.HexToAddress(resource.Address).Hex(), Name: resource.Name})
+				ev.Resources = append(ev.Resources, event.MessagingResource{Kind: resource.Kind, Address: common.HexToAddress(resource.Address).Hex(), Name: resource.Name,
+					VoucherAddress: resource.VoucherAddress, VoucherName: resource.VoucherName})
 			}
 			if err := EnqueueMessagingEvent(ctx, w.wc.queueClient, tx, ev); err != nil {
 				return err
@@ -236,7 +309,16 @@ func (w *SafeApprovalSyncWorker) syncTransaction(ctx context.Context, safeTx *sa
 	return tx.Commit(ctx)
 }
 
-func safeApprovalStage(index, required int) (string, bool) {
+func safeApprovalStage(index, required int, rejection bool) (string, bool) {
+	if rejection {
+		if index+1 == required {
+			return event.SafeRejectionApproved, index == 0
+		}
+		if index == 0 {
+			return event.SafeRejectionProposed, true
+		}
+		return event.SafeRejectionConfirmed, false
+	}
 	if index+1 == required {
 		return event.SafeApproved, index == 0
 	}
@@ -244,6 +326,48 @@ func safeApprovalStage(index, required int) (string, bool) {
 		return event.SafeProposed, true
 	}
 	return event.SafeConfirmed, false
+}
+
+func deduplicateStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(value)
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func safeApprovalVoucherCandidate(exec *safe.Exec, policy *safe.Policy) string {
+	calls := []safe.SubCall{{Operation: exec.Operation, To: exec.To, Value: exec.Value, Data: exec.Data}}
+	if exec.Operation == safe.OperationDelegateCall {
+		if _, ok := policy.MultiSend[exec.To]; ok {
+			if decoded, err := safe.DecodeMultiSend(exec.Data); err == nil {
+				calls = decoded
+			}
+		}
+	}
+	for _, call := range calls {
+		if len(call.Data) != 36 || string(call.Data[:4]) != string(addVoucherSelector) {
+			continue
+		}
+		return common.BytesToAddress(call.Data[16:36]).Hex()
+	}
+	return ""
+}
+
+func safeApprovalAction(exec *safe.Exec, safeAddress common.Address, policy *safe.Policy) string {
+	if exec.To == safeAddress && exec.Operation == safe.OperationCall && exec.Value.Sign() == 0 && len(exec.Data) == 0 {
+		return "reject"
+	}
+	if safeApprovalVoucherCandidate(exec, policy) != "" {
+		return "approve_voucher"
+	}
+	return "manage_resource"
 }
 
 func safeApprovalTargets(safeAddress common.Address, exec *safe.Exec, policy *safe.Policy) ([]string, bool) {

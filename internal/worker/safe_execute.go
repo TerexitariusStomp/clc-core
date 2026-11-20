@@ -17,6 +17,7 @@ import (
 	"github.com/lmittmann/w3/module/eth"
 	"github.com/lmittmann/w3/w3types"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 const (
@@ -71,6 +72,16 @@ type (
 
 func (SafeExecuteArgs) Kind() string { return "SAFE_EXECUTE" }
 
+func safeExecuteInsertOpts() *river.InsertOpts {
+	return &river.InsertOpts{
+		MaxAttempts: 6,
+		// A finalized job is kept unique as well. Automatic triggers must not
+		// create a second sponsored execution; the explicit Execute endpoint
+		// retries that same job after checking its OTX outcome.
+		UniqueOpts: river.UniqueOpts{ByArgs: true, ByState: rivertype.JobStates()},
+	}
+}
+
 // NewSafeResolver backs a safe.Policy with the catalog and signer projection.
 func NewSafeResolver(s store.Store, chainID int64) safe.Resolver {
 	return safeResolver{store: s, chainID: chainID}
@@ -106,12 +117,40 @@ func EnqueueSafeExecution(ctx context.Context, queue *river.Client[pgx.Tx], safe
 	}
 	_, err := queue.Insert(ctx, SafeExecuteArgs{
 		SafeTxHash: strings.ToLower(safeTxHash), Safe: strings.ToLower(safeAddress),
-	}, &river.InsertOpts{UniqueOpts: river.UniqueOpts{ByArgs: true}})
+	}, safeExecuteInsertOpts())
 	return err
 }
 
-func safeExecutionTrackingID(safeTxHash string) string {
+// EnqueueSafeExecutionTx is the transactional form used by approval
+// reconciliation so observing the final signature and queuing sponsored
+// execution commit together.
+func EnqueueSafeExecutionTx(ctx context.Context, queue *river.Client[pgx.Tx], tx pgx.Tx, safeAddress, safeTxHash string) error {
+	if queue == nil {
+		return errors.New("safe execution: worker queue not configured")
+	}
+	_, err := queue.InsertTx(ctx, tx, SafeExecuteArgs{
+		SafeTxHash: strings.ToLower(safeTxHash), Safe: strings.ToLower(safeAddress),
+	}, safeExecuteInsertOpts())
+	return err
+}
+
+// SafeExecutionTrackingID is stable across retries so status reads can join a
+// Safe proposal to every OTX attempt made for it.
+func SafeExecutionTrackingID(safeTxHash string) string {
 	return uuid.NewSHA1(safeExecutionNamespace, []byte(strings.ToLower(safeTxHash))).String()
+}
+
+func safeExecutionTrackingID(safeTxHash string) string {
+	return SafeExecutionTrackingID(safeTxHash)
+}
+
+// NextRetry keeps transient STS/RPC errors bounded and responsive rather than
+// inheriting River's attempt^4 default delay.
+func (w *SafeExecuteWorker) NextRetry(job *river.Job[SafeExecuteArgs]) time.Time {
+	if job.Attempt <= 3 {
+		return time.Now().Add(5 * time.Second)
+	}
+	return time.Now().Add(30 * time.Second)
 }
 
 func (w *SafeExecuteWorker) Work(ctx context.Context, job *river.Job[SafeExecuteArgs]) error {
@@ -130,10 +169,17 @@ func (w *SafeExecuteWorker) Work(ctx context.Context, job *river.Job[SafeExecute
 
 	exec, err := w.executor.Prepare(ctx, job.Args.SafeTxHash)
 	switch {
-	case errors.Is(err, safe.ErrSettled), errors.Is(err, safe.ErrNotReady):
-		// Executed elsewhere, replaced, or confirmed with signatures the
-		// backend cannot use: the Safe app remains the place to execute.
+	case errors.Is(err, safe.ErrSettled):
+		// Executed elsewhere or replaced.
 		return nil
+	case errors.Is(err, safe.ErrRejectedBySigners):
+		// A threshold-confirmed same-nonce rejection wins until an action has
+		// actually been submitted. Its own execution job consumes the nonce.
+		return nil
+	case errors.Is(err, safe.ErrNotReady):
+		// STS may briefly lag the final confirmation. Retry, and expose a failed
+		// state if the bounded attempts are exhausted so a signer can retry.
+		return err
 	case errors.Is(err, safe.ErrNotNext):
 		return river.JobSnooze(safeExecuteRetry)
 	case errors.Is(err, safe.ErrRejected):
@@ -153,8 +199,18 @@ func (w *SafeExecuteWorker) alreadySent(ctx context.Context, trackingID string) 
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	otx, err := w.wc.store.GetOTXByTrackingID(ctx, tx, trackingID)
-	return len(otx) > 0, err
+	otxs, err := w.wc.store.GetOTXByTrackingID(ctx, tx, trackingID)
+	if err != nil {
+		return false, err
+	}
+	for _, otx := range otxs {
+		if otx.DispatchStatus == store.SUCCESS || !store.IsTerminalDispatchStatus(otx.DispatchStatus) {
+			return true, nil
+		}
+	}
+	// Every recorded attempt ended terminally. A manually retried River job is
+	// allowed to prepare and submit a fresh OTX using the same tracking ID.
+	return false, nil
 }
 
 // safeExecuteGasLimit pads the estimate by a quarter, up to the cap, and never

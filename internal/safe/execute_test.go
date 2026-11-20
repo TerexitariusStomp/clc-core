@@ -17,8 +17,9 @@ import (
 
 type (
 	fakeSource struct {
-		tx  *Transaction
-		err error
+		tx     *Transaction
+		queued []Transaction
+		err    error
 	}
 
 	fakeExecState struct {
@@ -45,6 +46,9 @@ type (
 )
 
 func (f fakeSource) Transaction(context.Context, string) (*Transaction, error) { return f.tx, f.err }
+func (f fakeSource) Queued(context.Context, string, string) ([]Transaction, error) {
+	return f.queued, f.err
+}
 
 func (f fakeExecState) ReadExecState(context.Context, common.Address) (*ExecState, error) {
 	if f.err != nil {
@@ -339,6 +343,21 @@ func TestExecutorPrepare(t *testing.T) {
 		}
 		if got.Safe != safeAddr || exec.To != assetAddr || len(exec.Signatures) != 130 {
 			t.Fatalf("unexpected execution %+v", exec)
+		}
+	})
+
+	t.Run("a threshold rejection wins before the action is submitted", func(t *testing.T) {
+		action, actionHash := stored(t, fieldsFor(assetAddr, "4"), owners[0], owners[1])
+		rejectionFields := TxFields{
+			To: safeAddr.Hex(), Value: "0", Data: "0x", Operation: 0,
+			SafeTxGas: "0", BaseGas: "0", GasPrice: "0", GasToken: common.Address{}.Hex(),
+			RefundReceiver: common.Address{}.Hex(), Nonce: "4",
+		}
+		rejection, _ := stored(t, rejectionFields, owners[0], owners[2])
+		_, err := NewExecutor(100, newPolicy(), fakeSource{tx: action, queued: []Transaction{*action, *rejection}}, chain).
+			Prepare(context.Background(), actionHash.Hex())
+		if !errors.Is(err, ErrRejectedBySigners) {
+			t.Fatalf("Prepare() = %v, want ErrRejectedBySigners", err)
 		}
 	})
 

@@ -139,25 +139,76 @@ func (a *API) actingOwner(ctx context.Context, tx pgx.Tx, callerAddress string, 
 	return callerAddress
 }
 
-func (a *API) queueSafeExecution(ctx context.Context, safeAddress, safeTxHash string) bool {
-	if err := worker.EnqueueSafeExecution(ctx, a.queueClient, safeAddress, safeTxHash); err != nil {
-		a.logg.Error("could not queue Safe execution", "safeTxHash", safeTxHash, "err", err)
-		return false
+func safeExecutionState(progress store.SafeExecutionProgress) safe.ExecutionState {
+	if progress.OTXActive || progress.OTXSucceeded {
+		return safe.ExecutionSubmitted
 	}
-	return true
+	switch progress.JobState {
+	case "available", "pending", "running", "retryable", "scheduled":
+		return safe.ExecutionQueued
+	case "completed", "cancelled", "discarded":
+		return safe.ExecutionFailed
+	}
+	if progress.OTXFailed {
+		return safe.ExecutionFailed
+	}
+	return safe.ExecutionReady
 }
 
-func (a *API) safeExecutionsQueued(ctx context.Context, safeTxHashes []string) map[string]bool {
+func (a *API) safeExecutionProgresses(ctx context.Context, safeTxHashes []string) (map[string]store.SafeExecutionProgress, error) {
 	tx, err := a.store.Pool().Begin(ctx)
 	if err != nil {
-		a.logg.Error("could not read Safe executions", "err", err)
-		return nil
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	queued, err := a.store.SafeExecutionsQueued(ctx, tx, safeTxHashes)
+	trackingIDs := make([]string, len(safeTxHashes))
+	for i, hash := range safeTxHashes {
+		trackingIDs[i] = worker.SafeExecutionTrackingID(hash)
+	}
+	progress, err := a.store.SafeExecutionProgresses(ctx, tx, safeTxHashes, trackingIDs)
 	if err != nil {
-		a.logg.Error("could not read Safe executions", "err", err)
+		return nil, err
+	}
+	return progress, nil
+}
+
+func (a *API) safeExecutionStates(ctx context.Context, safeTxHashes []string) map[string]safe.ExecutionState {
+	progress, err := a.safeExecutionProgresses(ctx, safeTxHashes)
+	if err != nil {
+		a.logg.Error("could not read Safe execution states", "err", err)
 		return nil
 	}
-	return queued
+	states := make(map[string]safe.ExecutionState, len(progress))
+	for hash, item := range progress {
+		states[hash] = safeExecutionState(item)
+	}
+	return states
+}
+
+func (a *API) requestSafeExecution(ctx context.Context, safeAddress, safeTxHash string) safe.ExecutionState {
+	hash := strings.ToLower(safeTxHash)
+	progresses, err := a.safeExecutionProgresses(ctx, []string{hash})
+	if err != nil {
+		a.logg.Error("could not read Safe execution before request", "safe", safeAddress, "safe_tx_hash", safeTxHash, "err", err)
+		return safe.ExecutionFailed
+	}
+	progress := progresses[hash]
+	state := safeExecutionState(progress)
+	if state == safe.ExecutionQueued || state == safe.ExecutionSubmitted {
+		return state
+	}
+	if progress.JobID > 0 {
+		if _, err := a.queueClient.JobRetry(ctx, progress.JobID); err != nil {
+			a.logg.Error("could not retry Safe execution", "safe", safeAddress, "safe_tx_hash", safeTxHash, "job_id", progress.JobID, "err", err)
+			return safe.ExecutionFailed
+		}
+		a.logg.Info("retried Safe execution", "safe", safeAddress, "safe_tx_hash", safeTxHash, "job_id", progress.JobID)
+		return safe.ExecutionQueued
+	}
+	if err := worker.EnqueueSafeExecution(ctx, a.queueClient, safeAddress, safeTxHash); err != nil {
+		a.logg.Error("could not queue Safe execution", "safe", safeAddress, "safe_tx_hash", safeTxHash, "err", err)
+		return safe.ExecutionFailed
+	}
+	a.logg.Info("queued Safe execution", "safe", safeAddress, "safe_tx_hash", safeTxHash)
+	return safe.ExecutionQueued
 }

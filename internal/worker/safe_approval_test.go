@@ -8,8 +8,17 @@ import (
 	"github.com/cosmo-local-credit/clc-core/internal/safe"
 	"github.com/cosmo-local-credit/clc-core/pkg/event"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/riverqueue/river/rivertype"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSafeApprovalSyncUniquenessExpiresAfterCompletion(t *testing.T) {
+	states := safeApprovalSyncInsertOpts().UniqueOpts.ByState
+	require.Contains(t, states, rivertype.JobStateRunning)
+	require.Contains(t, states, rivertype.JobStateRetryable)
+	require.NotContains(t, states, rivertype.JobStateCompleted,
+		"a completed sync must not suppress the next 30-second reconciliation")
+}
 
 func TestSafeApprovalStage(t *testing.T) {
 	tests := []struct {
@@ -24,10 +33,19 @@ func TestSafeApprovalStage(t *testing.T) {
 		{3, 3, event.SafeConfirmed, false},
 	}
 	for _, test := range tests {
-		kind, proposed := safeApprovalStage(test.index, test.required)
+		kind, proposed := safeApprovalStage(test.index, test.required, false)
 		require.Equal(t, test.kind, kind)
 		require.Equal(t, test.proposed, proposed)
 	}
+}
+
+func TestSafeRejectionStage(t *testing.T) {
+	kind, proposed := safeApprovalStage(0, 2, true)
+	require.Equal(t, event.SafeRejectionProposed, kind)
+	require.True(t, proposed)
+	kind, proposed = safeApprovalStage(1, 2, true)
+	require.Equal(t, event.SafeRejectionApproved, kind)
+	require.False(t, proposed)
 }
 
 func TestSafeApprovalTargetsDeduplicatesAndRecognizesSelfManagement(t *testing.T) {

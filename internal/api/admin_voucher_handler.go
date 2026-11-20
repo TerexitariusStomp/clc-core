@@ -180,6 +180,9 @@ func (a *API) adminRestoreVoucherHandler(c *echo.Context) error {
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
+	if changed {
+		a.marketMapCache.clear()
+	}
 
 	c.Response().Header().Set("Cache-Control", "no-store")
 	return c.JSON(http.StatusOK, apiresp.OKResponse{
