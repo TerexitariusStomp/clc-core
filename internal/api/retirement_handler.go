@@ -363,6 +363,9 @@ func (a *API) decideRetirementRequestHandler(c *echo.Context) error {
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
+	if action == "approved" {
+		a.marketMapCache.clear()
+	}
 	if action == "invalidated" {
 		return handleConflictError(c, "Ownership changed. The request was invalidated; the current owner must submit a new request.")
 	}
@@ -405,6 +408,9 @@ func (a *API) adminRestorePoolHandler(c *echo.Context) error {
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
+	}
+	if changed {
+		a.marketMapCache.clear()
 	}
 	return retirementOK(c, map[string]any{"pool": pool})
 }
@@ -468,5 +474,6 @@ func (a *API) adminRetireResourceHandler(c *echo.Context) error {
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
+	a.marketMapCache.clear()
 	return retirementOK(c, map[string]any{"request": request, "changed": true})
 }
